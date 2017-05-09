@@ -106,7 +106,7 @@ class Client(Motor,
             self.mode = None
             HasPoolManager.__init__(self)
             self.ledgerManager = LedgerManager(self, ownedByNode=False)
-            self.ledgerManager.addLedger(0, self.ledger,
+            self.ledgerManager.addLedger(POOL_LEDGER_ID, self.ledger,
                 postCatchupCompleteClbk=self.postPoolLedgerCaughtUp,
                 postTxnAddedToLedgerClbk=self.postTxnFromCatchupAddedToLedger)
         else:

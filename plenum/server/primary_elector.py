@@ -6,7 +6,8 @@ from functools import partial
 from typing import Sequence, Any, Union, List
 
 from plenum.common.types import Nomination, Reelection, Primary, f
-from plenum.common.util import mostCommonElement, getQuorum
+from plenum.common.util import mostCommonElement, getQuorum, \
+    checkIfMoreThanFSameItems
 from stp_core.common.log import getlogger
 from plenum.server import replica
 from plenum.server.primary_decider import PrimaryDecider
@@ -31,9 +32,6 @@ class PrimaryElector(PrimaryDecider):
     Responsible for managing the election of a primary for all instances for
     a particular Node. Each node has a PrimaryElector.
     """
-
-    # Assumption: Nodes do not lie about last ordered seq numbers, this
-    # means that they will never send seqno that they have not ordered.
 
     def __init__(self, node):
         super().__init__(node)
@@ -238,13 +236,19 @@ class PrimaryElector(PrimaryDecider):
         """
         replica = self.replicas[instId]
         if not self.didReplicaNominate(instId):
+            last_ordered_pp_seq_no = replica.lastOrderedPPSeqNo
+            ledger_summary = replica.last_ordered_summary
             self.nominations[instId][replica.name] = (replica.name,
-                                                      replica.lastOrderedPPSeqNo)
+                                                      last_ordered_pp_seq_no,
+                                                      ledger_summary)
             logger.info("{} nominating itself for instance {}".
                         format(replica, instId),
                         extra={"cli": "PLAIN", "tags": ["node-nomination"]})
             self.sendNomination(replica.name, instId, self.viewNo,
-                                replica.lastOrderedPPSeqNo)
+                                last_ordered_pp_seq_no, ledger_summary)
+            # Since a replica might have received nominations but all
+            # nominations might have been behind
+            self._schedule(partial(self.decidePrimary, instId))
         else:
             logger.debug(
                 "{} already nominated, so hanging back".format(replica))
@@ -304,13 +308,19 @@ class PrimaryElector(PrimaryDecider):
             self.duplicateMsgs[key] = self.duplicateMsgs.get(key, 0) + 1
             return
 
-        self.nominations[instId][sndrRep] = (nom.name, nom.ordSeqNo)
+        self.nominations[instId][sndrRep] = (nom.name, nom.ordSeqNo, nom.ledgers)
 
         if replica.lastOrderedPPSeqNo <= nom.ordSeqNo:
             if not self.didReplicaNominate(instId):
-                self.nominations[instId][replica.name] = (nom.name, nom.ordSeqNo)
+                # Not using the last ordered seqno of the sender node
+                # since it might be malicious
+                last_ordered_pp_seq_no = replica.lastOrderedPPSeqNo
+                ledger_summary = replica.last_ordered_summary
+                self.nominations[instId][replica.name] = (nom.name,
+                                                          last_ordered_pp_seq_no,
+                                                          ledger_summary)
                 self.sendNomination(nom.name, nom.instId, nom.viewNo,
-                                    nom.ordSeqNo)
+                                    last_ordered_pp_seq_no, ledger_summary)
                 logger.debug("{} nominating {} for instance {}".
                              format(replica, nom.name, nom.instId),
                              extra={"cli": "PLAIN", "tags": ["node-nomination"]})
@@ -403,7 +413,7 @@ class PrimaryElector(PrimaryDecider):
                     if self.replicaNominatedForItself == instId:
                         self.replicaNominatedForItself = None
 
-                    self.node.primaryFound()
+                    self.node.primary_found()
 
                     self.scheduleElection()
                 else:
@@ -580,14 +590,30 @@ class PrimaryElector(PrimaryDecider):
                                 self.reElectionProposals[instId][replica.name]))
             return
 
-        if self.hasNominationQuorum(instId):
-            logger.debug("{} has got nomination quorum now".
+        # Primary is sent only when the largest last_ordered_seq has more than
+        # f consistent Nominations (meaning if 2 Nominations have same last
+        # ordered seq then their ledger summary should be same too)
+
+        # If have nomination from all, then
+        #   if there is an acceptable ordered state found, send primary else send re-election else
+        # else wait for timer to expire
+
+        if self.hasNominationsFromAll(instId):
+            logger.debug("{} has got all nominations".
                          format(replica))
-            primaryCandidates = self.getPrimaryCandidates(instId)
-            seq_no = self.get_last_ordered_seq_no(instId)
+            acceptable_state = self.get_acceptable_last_ordered_state(instId)
+            if acceptable_state is not None:
+                primaryCandidates = self.get_primary_candidates(instId,
+                                                                acceptable_state)
+                if len(primaryCandidates) == 1:
+                    primaryName, votes = primaryCandidates.pop()
+                    self.sendPrimary(instId, primaryName, *acceptable_state)
+            else:
+                self.sendReelection(instId,
+                                    [n[0] for n in primaryCandidates])
 
             # In case of one clear winner
-            if len(primaryCandidates) == 1:
+            if len(primaryCandidates) == 1 and acceptable_state is not None:
                 primaryName, votes = primaryCandidates.pop()
                 if self.hasNominationsFromAll(instId) or (
                         self.scheduledPrimaryDecisions[instId] is not None and
@@ -636,7 +662,7 @@ class PrimaryElector(PrimaryDecider):
                          format(replica))
 
     def sendNomination(self, name: str, instId: int, viewNo: int,
-                       lastOrderedSeqNo: int):
+                       last_ordered_seq_no: int, ledgers):
         """
         Broadcast a nomination message with the given parameters.
 
@@ -644,25 +670,25 @@ class PrimaryElector(PrimaryDecider):
         :param instId: instance id
         :param viewNo: view number
         """
-        self.send(Nomination(name, instId, viewNo, lastOrderedSeqNo))
+        self.send(Nomination(name, instId, viewNo, last_ordered_seq_no, ledgers))
 
-    def sendPrimary(self, instId: int, primaryName: str,
-                    lastOrderedSeqNo: int):
+    def sendPrimary(self, inst_id: int, primary_name: str,
+                    last_ordered_seq_no: int, ledgers):
         """
         Declare a primary and broadcast the message.
 
-        :param instId: the instanceId to which the primary belongs
-        :param primaryName: the name of the primary replica
+        :param inst_id: the instanceId to which the primary belongs
+        :param primary_name: the name of the primary replica
         """
-        replica = self.replicas[instId]
-        self.primaryDeclarations[instId][replica.name] = (primaryName,
-                                                          lastOrderedSeqNo)
-        self.scheduledPrimaryDecisions[instId] = None
+        replica = self.replicas[inst_id]
+        self.primaryDeclarations[inst_id][replica.name] = (primary_name,
+                                                           last_ordered_seq_no,
+                                                           ledgers)
+        self.scheduledPrimaryDecisions[inst_id] = None
         logger.debug("{} declaring primary as: {} on the basis of {}".
-                     format(replica, primaryName,
-                            self.nominations[instId]))
-        self.send(Primary(primaryName, instId, self.viewNo,
-                          lastOrderedSeqNo))
+                     format(replica, primary_name, self.nominations[inst_id]))
+        self.send(Primary(primary_name, inst_id, self.viewNo,
+                          last_ordered_seq_no, ledgers))
 
     def sendReelection(self, instId: int,
                        primaryCandidates: Sequence[str] = None) -> None:
@@ -675,7 +701,7 @@ class PrimaryElector(PrimaryDecider):
         replica = self.replicas[instId]
         self.reElectionRounds[instId] += 1
         primaryCandidates = primaryCandidates if primaryCandidates \
-            else self.getPrimaryCandidates(instId)
+            else self.get_primary_candidates(instId)
         self.reElectionProposals[instId][replica.name] = primaryCandidates
         self.scheduledPrimaryDecisions[instId] = None
         logger.debug("{} declaring reelection round {} for: {}".
@@ -683,22 +709,62 @@ class PrimaryElector(PrimaryDecider):
                             self.reElectionRounds[instId],
                             primaryCandidates))
         self.send(
-            Reelection(instId, self.reElectionRounds[instId], primaryCandidates,
-                       self.viewNo))
+            Reelection(instId, self.reElectionRounds[instId], self.viewNo,
+                       primaryCandidates))
 
-    def getPrimaryCandidates(self, instId: int):
+    def get_primary_candidates(self, inst_id: int, acceptable_state):
         """
         Return the list of primary candidates, i.e. the candidates with the
         maximum number of votes
         """
-        candidates = Counter([_[0] for _ in
-                              self.nominations[instId].values()]).most_common()
+        candidates = []
+        for c, o, s in self.nominations[inst_id].values():
+            if [o, s] == acceptable_state:
+                candidates.append(c)
+
+        candidates = Counter(candidates).most_common()
         # Candidates with max no. of votes
         return [c for c in candidates if c[1] == candidates[0][1]]
 
-    def get_last_ordered_seq_no(self, inst_id):
-        # Assumption: Nodes do not lie about last ordered seq numbers
-        return max([_[1] for _ in self.nominations[inst_id].values()])
+    def get_acceptable_last_ordered_state(self, inst_id):
+        """
+        Get last ordered seqno for which there are >f nominations and
+        there are <= f higher nominations. Returns None if cannot find such
+        a number. If master instance then also compare ledger summaries
+        :param inst_id:
+        :return:
+        """
+        freq = Counter([_[1] for _ in
+                        self.nominations[inst_id].values()]).most_common()
+        if len(freq) > 1:
+            for i, (elem, count) in enumerate(freq):
+                if count > self.f:
+                    others = sum([c for (_, c) in freq[:i]])
+                    if others <= self.f:
+                        acceptable = elem
+                        break
+            else:
+                return None
+        else:
+            acceptable = freq[0][0]
+        r = [acceptable]
+
+        if inst_id == 0:
+            # Master instance
+            summaries = []
+            for _, last_ordered, summary in self.nominations[inst_id].values():
+                if last_ordered == acceptable:
+                    summaries.append(summary)
+            acceptable_summary = checkIfMoreThanFSameItems(summaries, self.f)
+            if not acceptable_summary:
+                return None
+            else:
+                r.append(acceptable_summary)
+        else:
+            r.append({})
+        logger.debug('{} found acceptable last ordered state to be {}'.
+                     format(self, r))
+        return r
 
     def schedulePrimaryDecision(self, instId: int):
         """

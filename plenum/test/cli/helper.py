@@ -233,6 +233,7 @@ def waitClientConnected(cli, nodeNames, clientName):
                               nodeNames, clientName,
                               timeout=timeout))
 
+
 def checkActiveIdrPrinted(cli):
     assert 'Identifier:' in cli.lastCmdOutput
     assert 'Verification key:' in cli.lastCmdOutput
@@ -400,32 +401,6 @@ def assertNoClient(cli):
 # replyPat = re.compile("C: odict\((.+)\)$")
 replyPat = re.compile("C: ({.+$)")
 
-
-# def checkReply(cli, count, clbk):
-#     done = 0
-#     for out in cli.printeds:
-#         msg = out['msg']
-#         m = replyPat.search(msg)
-#         if m:
-#             if clbk(m.groups(0)[0].strip()):
-#             # result = ast.literal_eval(m.groups(0)[0].strip())
-#             # if clbk(result):
-#                 done += 1
-#     assert done == count
-#
-#
-# def checkSuccess(data):
-#     return data and "('success', True)" in data
-#
-#
-# balancePat = re.compile("\('balance', (\d+)\)")
-#
-#
-# def checkBalance(balance, data):
-#     if checkSuccess(data):
-#         searched = balancePat.search(data)
-#         if searched:
-#             return int(searched.group(1)) == balance
 
 def checkReply(cli, count, clbk):
     done = 0

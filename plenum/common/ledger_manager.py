@@ -98,17 +98,17 @@ class LedgerManager(HasActionQueue):
     def service(self):
         return self._serviceActions()
 
-    def addLedger(self, typ: int, ledger: Ledger,
+    def addLedger(self, iD: int, ledger: Ledger,
                   preCatchupStartClbk: Callable=None,
                   postCatchupStartClbk: Callable=None,
                   preCatchupCompleteClbk: Callable=None,
                   postCatchupCompleteClbk: Callable=None,
                   postTxnAddedToLedgerClbk: Callable=None):
-        if typ in self.ledgers:
+        if iD in self.ledgers:
             logger.error("{} already present in ledgers so cannot replace that "
-                         "ledger".format(typ))
+                         "ledger".format(iD))
             return
-        self.ledgers[typ] = {
+        self.ledgers[iD] = {
             "ledger": ledger,
             "state": LedgerState.not_synced,
             "canSync": False,
@@ -119,14 +119,14 @@ class LedgerManager(HasActionQueue):
             "postTxnAddedToLedgerClbk": postTxnAddedToLedgerClbk,
             "verifier": MerkleVerifier(ledger.hasher)
         }
-        self.stashedLedgerStatuses[typ] = deque()
-        self.ledgerStatusOk[typ] = set()
-        self.recvdConsistencyProofs[typ] = {}
-        self.catchUpTill[typ] = None
-        self.receivedCatchUpReplies[typ] = []
-        self.recvdCatchupRepliesFrm[typ] = {}
-        self.consistencyProofsTimers[typ] = None
-        self.catchupReplyTimers[typ] = None
+        self.stashedLedgerStatuses[iD] = deque()
+        self.ledgerStatusOk[iD] = set()
+        self.recvdConsistencyProofs[iD] = {}
+        self.catchUpTill[iD] = None
+        self.receivedCatchUpReplies[iD] = []
+        self.recvdCatchupRepliesFrm[iD] = {}
+        self.consistencyProofsTimers[iD] = None
+        self.catchupReplyTimers[iD] = None
 
     def checkIfCPsNeeded(self, ledgerId):
         if self.consistencyProofsTimers[ledgerId] is not None:

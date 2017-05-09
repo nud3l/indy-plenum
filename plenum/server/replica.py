@@ -15,10 +15,9 @@ from sortedcontainers import SortedDict
 
 import plenum.server.node
 from plenum.common.config_util import getConfig
-from plenum.common.exceptions import SuspiciousNode, InvalidClientRequest, \
+from plenum.common.exceptions import SuspiciousNode, \
     InvalidClientMessageException, UnknownIdentifier
 from plenum.common.signing import serialize
-from plenum.common.txn_util import reqToTxn
 from plenum.common.types import PrePrepare, \
     Prepare, Commit, Ordered, ThreePhaseMsg, ThreePhaseKey, ThreePCState, \
     CheckpointState, Checkpoint, Reject, f, InstanceChange
@@ -261,6 +260,50 @@ class Replica(HasActionQueue, MessageProcessor):
         return root
 
     @property
+    def last_ordered_summary(self):
+        """
+        If master
+            return the last ordered pre-prepare seqno and size and txn and
+            state root of each ledger
+        else
+            return the last ordered pre-prepare seqno
+        :return:
+        """
+        if self.ordered:
+            last_ordered_view, last_ordered_pp_seq = self.ordered[-1]
+        else:
+            # When node has not ordered any request after joining.
+            last_ordered_pp_seq = self.lastPrePrepareSeqNo
+            last_ordered_view = None
+
+        if self.isMaster:
+            if last_ordered_pp_seq > self.h:
+                # If not cleaned up in gc
+                # Get a PRE-PREPARE for this ordered pp seqno so tree roots
+                # and ledger ids can be retrieved
+
+                if last_ordered_view is not None:
+                    last_pp = self.getPrePrepare(last_ordered_view,
+                                                 last_ordered_pp_seq)
+                    ledgers = self.ledger_summary(
+                        *[i for i in self.node.ledgerManager.ledgers.keys()
+                          if i != last_pp.ledgerId])
+                    ledgers[last_pp.ledgerId] = [last_pp.post_ledger_size,
+                                                 last_pp.post_txn_root,
+                                                 last_pp.post_state_root]
+                else:
+                    # Can create summary from committed state
+                    ledgers = self.ledger_summary(
+                        *self.node.ledgerManager.ledgers.keys())
+            else:
+                # Cleaned up in gc
+                ledgers = self.ledger_summary(
+                    *self.node.ledgerManager.ledgers.keys())
+            return ledgers
+
+        return {}
+
+    @property
     def h(self) -> int:
         return self._h
 
@@ -296,13 +339,6 @@ class Replica(HasActionQueue, MessageProcessor):
         Replica should only participating in the consensus process and the
         replica did not stash any of this request's 3-phase request
         """
-        # msg = None
-        # if self.node.view_change_in_progress:
-        #     msg = 'view change in progress'
-        # if not self.node.isParticipating:
-        #     msg = 'node not participating'
-        # if (viewNo, ppSeqNo) in self.stashingWhileCatchingUp:
-        #     msg = 'already stashing'
         return self.node.isParticipating and (viewNo, ppSeqNo) \
                                              not in self.stashingWhileCatchingUp
 
@@ -350,7 +386,7 @@ class Replica(HasActionQueue, MessageProcessor):
             self._primaryName = value
             logger.debug("{} setting primaryName for view no {} to: {}".
                          format(self, self.viewNo, value))
-            self.removeObsoletePpReqs()
+            # self.removeObsoletePpReqs()
             self._stateChanged()
 
     def primaryChanged(self, primaryName, lastOrderedPPSeqNo):
@@ -478,14 +514,6 @@ class Replica(HasActionQueue, MessageProcessor):
         """
         return self.node.viewNo
 
-    def trackBatches(self, pp: PrePrepare, prevStateRootHash):
-        # pp.discarded indicates the index from where the discarded requests
-        #  starts hence the count of accepted requests, prevStateRoot is
-        # tracked to revert this PRE-PREPARE
-        logger.debug('{} tracking batch for {} with state root {}'.
-                     format(self, pp, prevStateRootHash))
-        self.batches[pp.ppSeqNo] = [pp.discarded, pp.ppTime, prevStateRootHash]
-
     def send3PCBatch(self):
         r = 0
         for lid, q in self.requestQueues.items():
@@ -496,7 +524,6 @@ class Replica(HasActionQueue, MessageProcessor):
                 oldStateRootHash = self.stateRootHash(lid, toHex=False)
                 ppReq = self.create3PCBatch(lid)
                 self.sendPrePrepare(ppReq)
-                self.trackBatches(ppReq, oldStateRootHash)
                 r += 1
 
         if r > 0:
@@ -520,20 +547,24 @@ class Replica(HasActionQueue, MessageProcessor):
             rejects.append(Reject(req.identifier, req.reqId, ex))
             inValidReqs.append(req)
 
-    def create3PCBatch(self, ledgerId):
+    def create3PCBatch(self, ledger_id):
         # TODO: If no valid requests then PRE-PREPARE should be sent but rejects
         #  should be tracked so they can be sent as part of next batch.
         ppSeqNo = self.lastPrePrepareSeqNo + 1
         logger.info("{} creating batch {} for ledger {} with state root {}".
-                    format(self, ppSeqNo, ledgerId,
-                           self.stateRootHash(ledgerId, toHex=False)))
+                    format(self, ppSeqNo, ledger_id,
+                           self.stateRootHash(ledger_id, toHex=False)))
         tm = time.time() * 1000
         validReqs = []
         inValidReqs = []
         rejects = []
+        old_state_root_hash = self.stateRootHash(ledger_id, toHex=False)
+        old_txn_root_hash = self.txnRootHash(ledger_id, toHex=False)
+
+        # TODO: This is bad, too much latency, needs to be fixed.
         while len(validReqs)+len(inValidReqs) < self.config.Max3PCBatchSize \
-                and self.requestQueues[ledgerId]:
-            req = self.requestQueues[ledgerId].popleft()
+                and self.requestQueues[ledger_id]:
+            req = self.requestQueues[ledger_id].popleft()
             self.processReqDuringBatch(req, validReqs, inValidReqs, rejects)
 
         reqs = validReqs+inValidReqs
@@ -545,17 +576,19 @@ class Replica(HasActionQueue, MessageProcessor):
                                    [(req.identifier, req.reqId) for req in reqs],
                                    len(validReqs),
                                    digest,
-                                   ledgerId,
-                                   self.stateRootHash(ledgerId),
-                                   self.txnRootHash(ledgerId)
+                                   ledger_id,
+                                   old_state_root_hash,
+                                   old_txn_root_hash,
+                                   self.stateRootHash(ledger_id),
+                                   self.txnRootHash(ledger_id)
                                    )
         logger.debug('{} created a PRE-PREPARE with {} requests for ledger {}'
-                     .format(self, len(validReqs), ledgerId))
+                     .format(self, len(validReqs), ledger_id))
         self.lastPrePrepareSeqNo = ppSeqNo
         if self.isMaster:
             self.outBox.extend(rejects)
-            self.node.onBatchCreated(ledgerId,
-                                     self.stateRootHash(ledgerId, toHex=False))
+            self.node.onBatchCreated(ledger_id,
+                                     self.stateRootHash(ledger_id, toHex=False))
         return prePrepareReq
 
     def sendPrePrepare(self, ppReq: PrePrepare):
@@ -663,9 +696,9 @@ class Replica(HasActionQueue, MessageProcessor):
         key = (pp.viewNo, pp.ppSeqNo)
         logger.debug("{} Receiving PRE-PREPARE{} at {} from {}".
                      format(self, key, time.perf_counter(), sender))
+        # Converting each req_idrs from list to tuple
         pp = updateNamedTuple(pp, **{f.REQ_IDR.nm: [(i, r)
                                                     for i, r in pp.reqIdr]})
-        oldStateRoot = self.stateRootHash(pp.ledgerId, toHex=False)
         if self.canProcessPrePrepare(pp, sender):
             self.addToPrePrepares(pp)
             if not self.node.isParticipating:
@@ -677,7 +710,6 @@ class Replica(HasActionQueue, MessageProcessor):
                 self.node.onBatchCreated(pp.ledgerId,
                                          self.stateRootHash(pp.ledgerId,
                                                             toHex=False))
-            self.trackBatches(pp, oldStateRoot)
             logger.debug("{} processed incoming PRE-PREPARE{}".format(self, key),
                          extra={"tags": ["processing"]})
 
@@ -865,11 +897,11 @@ class Replica(HasActionQueue, MessageProcessor):
         if self.isMaster:
             if pp.stateRootHash != self.stateRootHash(pp.ledgerId):
                 self.revert(pp.ledgerId, oldStateRoot, len(validReqs))
-                raise SuspiciousNode(sender, Suspicions.PPR_STATE_WRONG, pp)
+                raise SuspiciousNode(sender, Suspicions.PPR_POST_STATE_WRONG, pp)
 
             if pp.txnRootHash != self.txnRootHash(pp.ledgerId):
                 self.revert(pp.ledgerId, oldStateRoot, len(validReqs))
-                raise SuspiciousNode(sender, Suspicions.PPR_TXN_WRONG, pp)
+                raise SuspiciousNode(sender, Suspicions.PPR_POST_TXN_WRONG, pp)
 
             self.outBox.extend(rejects)
 
@@ -921,7 +953,7 @@ class Replica(HasActionQueue, MessageProcessor):
     def addToPrePrepares(self, pp: PrePrepare) -> None:
         """
         Add the specified PRE-PREPARE to this replica's list of received
-        PRE-PREPAREs.
+        PRE-PREPAREs and try sending PREPARE
 
         :param pp: the PRE-PREPARE to add to the list
         """
@@ -996,15 +1028,21 @@ class Replica(HasActionQueue, MessageProcessor):
             raise SuspiciousNode(sender, Suspicions.PR_DIGEST_WRONG, prepare)
 
         elif prepare.stateRootHash != ppReq.stateRootHash:
-            raise SuspiciousNode(sender, Suspicions.PR_STATE_WRONG,
+            raise SuspiciousNode(sender, Suspicions.PR_POST_STATE_WRONG,
                                  prepare)
         elif prepare.txnRootHash != ppReq.txnRootHash:
-            raise SuspiciousNode(sender, Suspicions.PR_TXN_WRONG,
+            raise SuspiciousNode(sender, Suspicions.PR_POST_TXN_WRONG,
                                  prepare)
         else:
             return True
 
     def addToPrepares(self, prepare: Prepare, sender: str):
+        """
+        Add the specified PREPARE to this replica's list of received
+        PREPAREs and try sending COMMIT
+
+        :param prepare: the PREPARE to add to the list
+        """
         self.prepares.addVote(prepare, sender)
         self.tryCommit(prepare)
 
@@ -1369,8 +1407,6 @@ class Replica(HasActionQueue, MessageProcessor):
             self.prePrepares.pop(k, None)
             self.prepares.pop(k, None)
             self.commits.pop(k, None)
-            # if k in self.ordered:
-            #     self.ordered.remove(k)
 
         for k in reqKeys:
             self.requests[k].forwardedTo -= 1
@@ -1557,6 +1593,15 @@ class Replica(HasActionQueue, MessageProcessor):
             logger.debug("Could not find request key for 3 phase key {}".
                          format(key))
         return reqKey
+
+    def ledger_summary(self, *ledger_ids):
+        r = {}
+        for i in ledger_ids:
+            ledger = self.node.getLedger(i)
+            state = self.node.getState(i)
+            r[i] = [ledger.size, hexlify(ledger.root_hash),
+                    hexlify(state.committedHeadHash)]
+        return r
 
     @property
     def threePhaseState(self):

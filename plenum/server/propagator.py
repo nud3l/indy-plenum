@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from collections import deque
 from typing import Dict, Tuple, Union
 import weakref
 
@@ -117,6 +118,7 @@ class Requests(OrderedDict):
 class Propagator:
     def __init__(self):
         self.requests = Requests()
+        self.reqs_stashed_for_primary = deque()
 
     # noinspection PyUnresolvedReferences
     def propagate(self, request: Request, clientName):
@@ -130,8 +132,8 @@ class Propagator:
         else:
             self.requests.addPropagate(request, self.name)
             # Only propagate if the node is participating in the consensus
-            #  process
-            # which happens when the node has completed the catchup process
+            # process which happens when the node has completed the
+            # catchup process. QUESTION: WHY?
             if self.isParticipating:
                 propagate = self.createPropagate(request, clientName)
                 logger.display("{} propagating {} request {} from client {}".
@@ -185,13 +187,16 @@ class Propagator:
         :param request: the REQUEST to propagate
         """
         key = request.key
-        for idx, repQueue in enumerate(self.msgsToReplicas):
-            if self.primaryReplicaNo == idx:
-                # req = weakref.ref(self.requests[key].finalised)
-                req = self.requests[key].finalised
-                repQueue.append(req)
-                logger.debug("{} forwarding client request {} to its replicas".
-                             format(self, key))
+        fin_req = self.requests[key].finalised
+        if self.primaryReplicaNo is not None:
+            self.msgsToReplicas[self.primaryReplicaNo].append(fin_req)
+            logger.debug("{} forwarding client request {} to replica {}".
+                         format(self, key, self.primaryReplicaNo))
+        elif not self.all_instances_have_primary:
+            logger.debug('{} stashing request {} since at least one replica '
+                         'lacks primary'.format(self, key))
+            self.reqs_stashed_for_primary.append(fin_req)
+
         self.monitor.requestUnOrdered(*key)
         self.requests.flagAsForwarded(request, len(self.msgsToReplicas))
 
@@ -224,3 +229,18 @@ class Propagator:
         else:
             logger.trace("{} not forwarding request {} to its replicas "
                          "since {}".format(self, request, msg))
+
+    def process_reqs_stashed_for_primary(self):
+        if self.reqs_stashed_for_primary:
+            if self.primaryReplicaNo is not None:
+                self.msgsToReplicas[self.primaryReplicaNo].extend(
+                    self.reqs_stashed_for_primary)
+                logger.debug("{} forwarding stashed {} client requests to "
+                             "replica {}".
+                             format(self, len(self.reqs_stashed_for_primary),
+                                    self.primaryReplicaNo))
+            elif not self.all_instances_have_primary:
+                return
+            # Either the stashed requests have been given to a primary or this
+            # node does not have a primary, so clear the queue
+            self.reqs_stashed_for_primary.clear()

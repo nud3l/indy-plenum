@@ -584,7 +584,8 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
             ledgers.append(self.poolLedger)
         if self.hashStore:
             hashStores.append(self.hashStore)
-        if isinstance(self.poolManager, TxnPoolManager) and self.poolManager.hashStore:
+        if isinstance(self.poolManager, TxnPoolManager) and \
+                self.poolManager.hashStore:
             hashStores.append(self.poolManager.hashStore)
         hashStores = [hs for hs in hashStores if
                       isinstance(hs, (FileHashStore, LevelDbHashStore))
@@ -1057,6 +1058,9 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
 
     @property
     def master_primary(self) -> Optional[str]:
+        """
+        Return the name of the primary node of the master instance
+        """
         if self.replicas[0].primaryName:
             return self.replicas[0].getNodeName(self.replicas[0].primaryName)
         return None
@@ -1095,14 +1099,17 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         viewNo = getattr(msg, f.VIEW_NO.nm, None)
         if not self.is_valid_view_or_inst(viewNo):
             return False
-        if viewNo < self.viewNo:
-            if isinstance(msg, ThreePhaseType):
-                inst_id = getattr(msg, f.INST_ID.nm, None)
-                if self.is_valid_view_or_inst(inst_id):
-                    return False
-                if len(self.expecting_during_view_change) > inst_id and \
-                                self.expecting_during_view_change[inst_id] >= msg.ppSeqNo:
-                    return True
+        # if viewNo < self.viewNo:
+        #     if isinstance(msg, ThreePhaseType):
+        #         inst_id = getattr(msg, f.INST_ID.nm, None)
+        #         if self.is_valid_view_or_inst(inst_id):
+        #             return False
+        #         if len(self.expecting_during_view_change) > inst_id and \
+        #                         self.expecting_during_view_change[inst_id] >= msg.ppSeqNo:
+        #             return True
+        #     self.discard(msg, "un-acceptable viewNo {}"
+        #                  .format(viewNo), logMethod=logger.info)
+        if self.viewNo - viewNo > 1:
             self.discard(msg, "un-acceptable viewNo {}"
                          .format(viewNo), logMethod=logger.info)
         elif viewNo > self.viewNo:
@@ -1771,9 +1778,14 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         """
         return (2 * self.f) + 1
 
-    def primaryFound(self):
+    def primary_found(self):
         # If the node has primary replica of master instance
         self.monitor.hasMasterPrimary = self.primaryReplicaNo == 0
+        self.process_reqs_stashed_for_primary()
+
+    @property
+    def all_instances_have_primary(self):
+        return all(r.primaryName is not None for r in self.replicas)
 
     def canViewChange(self, proposedViewNo: int) -> (bool, str):
         """
@@ -1836,6 +1848,14 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         pop_keys(self.msgsForFutureViews, lambda x: x <= self.viewNo)
         self.initInsChngThrottling()
         self.logNodeInfo()
+
+    def on_view_change_complete(self, inst_id, view_no):
+        """
+        View change completes for a replica when it has been decided which was 
+        the last ppSeqno and state and txn root for previous view
+        """
+        # TODO:
+        pass
 
     def ordered_prev_view_msgs(self, inst_id, pp_seqno):
         logger.debug('{} ordered previous view batch {} by instance {}'.
@@ -2126,8 +2146,8 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
 
         if code in (s.code for s in (Suspicions.PPR_DIGEST_WRONG,
                                      Suspicions.PPR_REJECT_WRONG,
-                                     Suspicions.PPR_TXN_WRONG,
-                                     Suspicions.PPR_STATE_WRONG)):
+                                     Suspicions.PPR_POST_TXN_WRONG,
+                                     Suspicions.PPR_POST_STATE_WRONG)):
             self.sendInstanceChange(self.viewNo + 1, Suspicions.get_by_code(code))
             logger.info('{} sent instance change since suspicion code {}'
                         .format(self, code))

@@ -26,10 +26,6 @@ class Ledger(_Ledger):
         self.uncommittedRootHash = None
         self.uncommittedTree = None
 
-    @property
-    def uncommittedSize(self):
-        return len(self.uncommittedTxns)
-
     def appendTxns(self, txns: List):
         # These transactions are not yet committed so they do not go to
         # the ledger
@@ -98,7 +94,3 @@ class Ledger(_Ledger):
         for txn in txns:
             tempTree.append(self.serializeLeaf(txn))
         return tempTree
-
-    @staticmethod
-    def hashToStr(h):
-        return base58.b58encode(h)
