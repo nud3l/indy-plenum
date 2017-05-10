@@ -61,8 +61,7 @@ class LedgerInfo:
 
         # Dictionary of consistency proofs received for the ledger
         # in process of catching up
-        # For each dictionary key is the node name and
-        # value is a consistency proof.
+        # Key is the node name and value is a consistency proof
         self.recvdConsistencyProofs = {}
 
         self.catchUpTill = None
@@ -77,18 +76,23 @@ class LedgerInfo:
         #  node gets f+1 consistency proofs. If the node is not able to begin
         # the catchup process even after the timer expires then it requests
         # consistency proofs.
-        self.consistencyProofsTimers = None
+        self.consistencyProofsTimer = None
 
         # Tracks the beginning of catchup reply timer. Timer starts after the
         #  node sends catchup requests. If the node is not able to finish the
         # the catchup process even after the timer expires then it requests
         # missing transactions.
-        self.catchupReplyTimers = None
+        self.catchupReplyTimer = None
 
 
 class LedgerManager(HasActionQueue):
-    def __init__(self, owner, ownedByNode: bool=True,
-                 postAllLedgersCaughtUp: Optional[Callable]=None):
+
+    def __init__(self,
+                 owner,
+                 ownedByNode: bool=True,
+                 postAllLedgersCaughtUp:
+                 Optional[Callable]=None):
+
         self.owner = owner
         self.ownedByNode = ownedByNode
         self.postAllLedgersCaughtUp = postAllLedgersCaughtUp
@@ -138,25 +142,29 @@ class LedgerManager(HasActionQueue):
         )
 
     def checkIfCPsNeeded(self, ledgerId):
-        if self.consistencyProofsTimers[ledgerId] is not None:
-            logger.debug("{} requesting consistency proofs after timeout".format(self))
-            adjustedF = getMaxFailures(self.owner.totalNodes - 1)
-            recvdConsProof = self.recvdConsistencyProofs[ledgerId]
-            grpdPrf, nullProofs = self._groupConsistencyProofs(recvdConsProof)
-            if nullProofs > adjustedF:
-                return
-            result = self._latestReliableProof(grpdPrf,
-                                               self.ledgers[ledgerId][
-                                                   "ledger"])
-            if not result:
-                cpReq = self.getConsistencyProofRequest(ledgerId, grpdPrf)
-                logger.debug("{} sending consistency proof request: {}".
-                             format(self, cpReq))
-                self.send(cpReq)
+        # TODO: this one not just checks it also initiates
+        # consistency proof exchange process
+        # It should be renamed or splat on two different methods
 
-            self.recvdConsistencyProofs[ledgerId] = {}
-            self.consistencyProofsTimers[ledgerId] = None
-            self.recvdCatchupRepliesFrm[ledgerId] = {}
+        ledger = self.ledgers.get(ledgerId)
+        if ledger.consistencyProofsTimer is None:
+            return
+        logger.debug("{} requesting consistency "
+                     "proofs after timeout".format(self))
+        adjustedF = getMaxFailures(self.owner.totalNodes - 1)
+        proofs = ledger.recvdConsistencyProofs
+        groupedProofs, nullProofs = self._groupConsistencyProofs(proofs)
+        if nullProofs > adjustedF:
+            return
+        result = self._latestReliableProof(groupedProofs, ledger)
+        if not result:
+            cpReq = self.getConsistencyProofRequest(ledgerId, groupedProofs)
+            logger.debug("{} sending consistency proof request: {}".
+                         format(self, cpReq))
+            self.send(cpReq)
+        ledger.recvdConsistencyProofs = {}
+        ledger.consistencyProofsTimer = None
+        ledger.recvdCatchupRepliesFrm = {}
 
     def checkIfTxnsNeeded(self, ledgerId):
         if self.catchupReplyTimers[ledgerId] is not None:
