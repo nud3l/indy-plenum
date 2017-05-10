@@ -27,6 +27,65 @@ from plenum.server.has_action_queue import HasActionQueue
 logger = getlogger()
 
 
+class LedgerInfo:
+    def __init__(self,
+                 ledger,
+                 state,
+                 canSync,
+                 preCatchupStartClbk,
+                 postCatchupStartClbk,
+                 preCatchupCompleteClbk,
+                 postCatchupCompleteClbk,
+                 postTxnAddedToLedgerClbk,
+                 verifier):
+
+        self.ledger = ledger
+
+        self.state = state
+        self.canSync = canSync
+        self.preCatchupStartClbk = preCatchupStartClbk
+        self.postCatchupStartClbk = postCatchupStartClbk
+        self.preCatchupCompleteClbk = preCatchupCompleteClbk
+        self.postCatchupCompleteClbk = postCatchupCompleteClbk
+        self.postTxnAddedToLedgerClbk = postTxnAddedToLedgerClbk
+        self.verifier = verifier
+
+        # Ledger statuses received while the ledger was not ready to be synced
+        # (`canSync` was set to False)
+        self.stashedLedgerStatuses = deque()
+
+        # Tracks which nodes claim that this node's ledger status is ok
+        # If a quorum of nodes (2f+1) say its up to date then mark the catchup
+        #  process as completed
+        self.ledgerStatusOk = set()
+
+        # Dictionary of consistency proofs received for the ledger
+        # in process of catching up
+        # For each dictionary key is the node name and
+        # value is a consistency proof.
+        self.recvdConsistencyProofs = {}
+
+        self.catchUpTill = None
+
+        # Catchup replies that need to be applied to the ledger
+        self.receivedCatchUpReplies = []
+
+        # Keep track of received replies from different senders
+        self.recvdCatchupRepliesFrm = {}
+
+        # Tracks the beginning of consistency proof timer. Timer starts when the
+        #  node gets f+1 consistency proofs. If the node is not able to begin
+        # the catchup process even after the timer expires then it requests
+        # consistency proofs.
+        self.consistencyProofsTimers = None
+
+        # Tracks the beginning of catchup reply timer. Timer starts after the
+        #  node sends catchup requests. If the node is not able to finish the
+        # the catchup process even after the timer expires then it requests
+        # missing transactions.
+        self.catchupReplyTimers = None
+
+
 class LedgerManager(HasActionQueue):
     def __init__(self, owner, ownedByNode: bool=True,
                  postAllLedgersCaughtUp: Optional[Callable]=None):
@@ -39,52 +98,8 @@ class LedgerManager(HasActionQueue):
         HasActionQueue.__init__(self)
 
         # Holds ledgers of different types with their info like the ledger
-        # object, various callbacks, state (can be synced, is already synced,
-        # etc).
-        self.ledgers = {}   # type: Dict[int, Dict[str, Any]]
-
-        # Ledger statuses received while the ledger was not ready to be synced
-        # (`canSync` was set to False)
-        self.stashedLedgerStatuses = {}  # type: Dict[int, deque]
-
-        # Dict of sets with each set corresponding to a ledger
-        # Each set tracks which nodes claim that this node's ledger status is ok
-        # , if a quorum of nodes (2f+1) say its up to date then mark the catchup
-        #  process as completed
-        self.ledgerStatusOk = {}        # type: Dict[int, Set]
-
-        # Consistency proofs received in process of catching up.
-        # Each element of the dict is the dictionary of consistency proofs
-        # received for the ledger. For each dictionary key is the node name and
-        # value is a consistency proof.
-        self.recvdConsistencyProofs = {}  # type: Dict[int, Dict[str,
-        # ConsistencyProof]]
-
-        self.catchUpTill = {}
-
-        # Catchup replies that need to be applied to the ledger. First element
-        # of the list is a list of transactions that need to be applied to the
-        # pool transaction ledger and the second element is the list of
-        # transactions that need to be applied to the domain transaction ledger
-        self.receivedCatchUpReplies = {}    # type: Dict[int, List]
-
-        # Keep track of received replies from different senders
-        self.recvdCatchupRepliesFrm = {}
-        # type: Dict[int, Dict[str, List[CatchupRep]]]
-
-        # Tracks the beginning of consistency proof timer. Timer starts when the
-        #  node gets f+1 consistency proofs. If the node is not able to begin
-        # the catchup process even after the timer expires then it requests
-        # consistency proofs.
-        self.consistencyProofsTimers = {}
-        # type: Dict[int, Optional[float]]
-
-        # Tracks the beginning of catchup reply timer. Timer starts after the
-        #  node sends catchup requests. If the node is not able to finish the
-        # the catchup process even after the timer expires then it requests
-        # missing transactions.
-        self.catchupReplyTimers = {}
-        # type: Dict[int, Optional[float]]
+        # object, various callbacks, state
+        self.ledgers = {}   # type: Dict[int, LedgerInfo]
 
         # Largest Pre-Prepare sequence number received during catchup. T
         # his field is needed to discard any stashed 3 phase messages or
@@ -104,29 +119,23 @@ class LedgerManager(HasActionQueue):
                   preCatchupCompleteClbk: Callable=None,
                   postCatchupCompleteClbk: Callable=None,
                   postTxnAddedToLedgerClbk: Callable=None):
+
         if iD in self.ledgers:
-            logger.error("{} already present in ledgers so cannot replace that "
-                         "ledger".format(iD))
+            logger.error("{} already present in ledgers "
+                         "so cannot replace that ledger".format(iD))
             return
-        self.ledgers[iD] = {
-            "ledger": ledger,
-            "state": LedgerState.not_synced,
-            "canSync": False,
-            "preCatchupStartClbk": preCatchupStartClbk,
-            "postCatchupStartClbk": postCatchupStartClbk,
-            "preCatchupCompleteClbk": preCatchupCompleteClbk,
-            "postCatchupCompleteClbk": postCatchupCompleteClbk,
-            "postTxnAddedToLedgerClbk": postTxnAddedToLedgerClbk,
-            "verifier": MerkleVerifier(ledger.hasher)
-        }
-        self.stashedLedgerStatuses[iD] = deque()
-        self.ledgerStatusOk[iD] = set()
-        self.recvdConsistencyProofs[iD] = {}
-        self.catchUpTill[iD] = None
-        self.receivedCatchUpReplies[iD] = []
-        self.recvdCatchupRepliesFrm[iD] = {}
-        self.consistencyProofsTimers[iD] = None
-        self.catchupReplyTimers[iD] = None
+
+        self.ledgers[iD] = LedgerInfo(
+            ledger=ledger,
+            state=LedgerState.not_synced,
+            canSync=False,
+            preCatchupStartClbk=preCatchupStartClbk,
+            postCatchupStartClbk=postCatchupStartClbk,
+            preCatchupCompleteClbk=preCatchupCompleteClbk,
+            postCatchupCompleteClbk=postCatchupCompleteClbk,
+            postTxnAddedToLedgerClbk=postTxnAddedToLedgerClbk,
+            verifier=MerkleVerifier(ledger.hasher)
+        )
 
     def checkIfCPsNeeded(self, ledgerId):
         if self.consistencyProofsTimers[ledgerId] is not None:
