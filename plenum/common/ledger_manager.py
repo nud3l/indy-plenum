@@ -379,22 +379,24 @@ class LedgerManager(HasActionQueue):
         logger.debug("{} received catchup request: {} from {}".
                      format(self, req, frm))
 
-        start, end = getattr(req, f.SEQ_NO_START.nm), \
-                     getattr(req, f.SEQ_NO_END.nm)
+        start = getattr(req, f.SEQ_NO_START.nm)
+        end = getattr(req, f.SEQ_NO_END.nm)
         ledger = self.getLedgerForMsg(req)
         if end < start:
             self.discard(req, reason="Invalid range", logMethod=logger.warn)
             return
         if start > ledger.size:
-            self.discard(req, reason="{} not able to service since ledger size "
-                                     "is {}".format(self, ledger.size),
+            self.discard(req, reason="{} not able to service since "
+                                     "ledger size is {}"
+                         .format(self, ledger.size),
                          logMethod=logger.debug)
             return
 
         # Adjusting for end greater than ledger size
         if end > ledger.size:
-            logger.debug("{} does not have transactions till {} so sending only"
-                         " till {}".format(self, end, ledger.size))
+            logger.debug("{} does not have transactions till {} "
+                         "so sending only till {}"
+                         .format(self, end, ledger.size))
             end = ledger.size
 
         # TODO: This is very inefficient for long ledgers
@@ -414,41 +416,47 @@ class LedgerManager(HasActionQueue):
         logger.debug("{} received catchup reply from {}: {}".
                      format(self, frm, rep))
 
-        ledgerId = getattr(rep, f.LEDGER_ID.nm)
         txns = self.canProcessCatchupReply(rep)
         txnsNum = len(txns) if txns else 0
         logger.debug("{} found {} transactions in the catchup from {}"
                      .format(self, txnsNum, frm))
-        if txns:
-            ledger = self.getLedgerForMsg(rep)
-            if frm not in self.recvdCatchupRepliesFrm[ledgerId]:
-                self.recvdCatchupRepliesFrm[ledgerId][frm] = []
-            self.recvdCatchupRepliesFrm[ledgerId][frm].append(rep)
-            catchUpReplies = self.receivedCatchUpReplies[ledgerId]
-            # Creating a list of txns sorted on the basis of sequence
-            # numbers
-            logger.debug("{} merging all received catchups".format(self))
-            catchUpReplies = list(heapq.merge(catchUpReplies, txns,
-                                              key=operator.itemgetter(0)))
-            logger.debug(
-                "{} merged catchups, there are {} of them now, from {} to {}"
-                .format(self, len(catchUpReplies), catchUpReplies[0][0],
-                        catchUpReplies[-1][0]))
+        if not txns:
+            return
 
-            numProcessed = self._processCatchupReplies(ledgerId, ledger,
-                                                       catchUpReplies)
-            logger.debug(
-                "{} processed {} catchup replies with sequence numbers {}"
-                    .format(self, numProcessed, [seqNo for seqNo, _ in
-                                                 catchUpReplies[
-                                                 :numProcessed]]))
-            self.receivedCatchUpReplies[ledgerId] = \
-                catchUpReplies[numProcessed:]
-            if getattr(self.catchUpTill[ledgerId], f.SEQ_NO_END.nm) == \
-                    ledger.size:
-                cp = self.catchUpTill[ledgerId]
-                self.catchUpTill[ledgerId] = None
-                self.catchupCompleted(ledgerId, cp.ppSeqNo)
+        ledgerId = getattr(rep, f.LEDGER_ID.nm)
+        ledger = self.ledgers[ledgerId]
+
+        reallyLedger = self.getLedgerForMsg(rep)
+
+        if frm not in ledger.recvdCatchupRepliesFrm:
+            ledger.recvdCatchupRepliesFrm[frm] = []
+
+        ledger.recvdCatchupRepliesFrm[frm].append(rep)
+
+        catchUpReplies = ledger.receivedCatchUpReplies
+        # Creating a list of txns sorted on the basis of sequence
+        # numbers
+        logger.debug("{} merging all received catchups".format(self))
+        catchUpReplies = list(heapq.merge(catchUpReplies, txns,
+                                          key=operator.itemgetter(0)))
+        logger.debug(
+            "{} merged catchups, there are {} of them now, from {} to {}"
+            .format(self, len(catchUpReplies), catchUpReplies[0][0],
+                    catchUpReplies[-1][0]))
+
+        numProcessed = self._processCatchupReplies(ledgerId, reallyLedger,
+                                                   catchUpReplies)
+        logger.debug(
+            "{} processed {} catchup replies with sequence numbers {}"
+                .format(self, numProcessed, [seqNo for seqNo, _ in
+                                             catchUpReplies[
+                                             :numProcessed]]))
+
+        ledger.receivedCatchUpReplies = catchUpReplies[numProcessed:]
+        if getattr(ledger.catchUpTill, f.SEQ_NO_END.nm) == reallyLedger.size:
+            cp = ledger.catchUpTill
+            ledger.catchUpTill = None
+            self.catchupCompleted(ledgerId, cp.ppSeqNo)
 
     def _processCatchupReplies(self, ledgerId, ledger: Ledger,
                                catchUpReplies: List):
