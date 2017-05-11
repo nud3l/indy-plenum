@@ -345,8 +345,7 @@ class LedgerManager(HasActionQueue):
                      format(self, proof, frm))
         ledgerId = getattr(proof, f.LEDGER_ID.nm)
         if self.canProcessConsistencyProof(proof):
-            self.recvdConsistencyProofs[ledgerId][frm] = \
-                ConsistencyProof(*proof)
+            self.ledgers[ledgerId].recvdConsistencyProofs[frm] = ConsistencyProof(*proof)
             canCatchup, catchUpFrm = self.canStartCatchUpProcess(ledgerId)
             if canCatchup:
                 self.startCatchUpProcess(ledgerId, catchUpFrm)
