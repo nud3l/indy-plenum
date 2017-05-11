@@ -839,9 +839,9 @@ class LedgerManager(HasActionQueue):
         return self._compareLedger(status) == 0
 
     def getLedgerForMsg(self, msg: Any) -> Ledger:
-        typ = getattr(msg, f.LEDGER_ID.nm)
-        if typ in self.ledgers:
-            return self.ledgers[typ]["ledger"]
+        ledgerType = getattr(msg, f.LEDGER_ID.nm)
+        if ledgerType in self.ledgers:
+            return self.ledgers[ledgerType].ledger
         else:
             self.discard(msg, reason="Invalid ledger msg type")
 
@@ -871,17 +871,14 @@ class LedgerManager(HasActionQueue):
         return i
 
     def getStack(self, remoteName: str):
-        if self.ownedByNode:
-            if self.clientstack.hasRemote(remoteName):
-                return self.clientstack
-            else:
-                pass
+        if self.ownedByNode and self.clientstack.hasRemote(remoteName):
+            return self.clientstack
 
         if self.nodestack.hasRemote(remoteName):
             return self.nodestack
-        else:
-            logger.error("{} cannot find remote with name {}".
-                         format(self, remoteName))
+
+        logger.error("{} cannot find remote with name {}"
+                     .format(self, remoteName))
 
     def sendTo(self, msg: Any, to: str):
         stack = self.getStack(to)
@@ -906,8 +903,7 @@ class LedgerManager(HasActionQueue):
     def clientstack(self):
         if self.ownedByNode:
             return self.owner.clientstack
-        else:
-            logger.debug("{} trying to get clientstack".format(self))
+        logger.debug("{} trying to get clientstack".format(self))
 
     @property
     def send(self):
@@ -921,5 +917,4 @@ class LedgerManager(HasActionQueue):
     def blacklistedNodes(self):
         if self.ownedByNode:
             return self.owner.blacklistedNodes
-        else:
-            return set()
+        return set()
