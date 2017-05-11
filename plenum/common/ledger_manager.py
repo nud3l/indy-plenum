@@ -272,12 +272,12 @@ class LedgerManager(HasActionQueue):
             return
         self.ledgers[ledgerType].state = state
 
-    def setLedgerCanSync(self, typ: int, canSync: bool):
-        if typ not in self.ledgers:
-            logger.error("ledger type {} not present in ledgers so cannot set "
-                         "state".format(typ))
+    def setLedgerCanSync(self, ledgerType: int, canSync: bool):
+        if ledgerType not in self.ledgers:
+            logger.error("ledger type {} not present in ledgers so "
+                         "cannot set state".format(ledgerType))
             return
-        self.ledgers[typ]["canSync"] = canSync
+        self.ledgers[ledgerType].canSync = canSync
 
     def processLedgerStatus(self, status: LedgerStatus, frm: str):
         logger.debug("{} received ledger status: {} from {}".
