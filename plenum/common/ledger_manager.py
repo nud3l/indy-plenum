@@ -265,12 +265,12 @@ class LedgerManager(HasActionQueue):
         self._schedule(partial(self.checkIfTxnsNeeded, ledgerId), timeout)
 
 
-    def setLedgerState(self, typ: int, state: LedgerState):
-        if typ not in self.ledgers:
-            logger.error("ledger type {} not present in ledgers so cannot set "
-                         "state".format(typ))
+    def setLedgerState(self, ledgerType: int, state: LedgerState):
+        if ledgerType not in self.ledgers:
+            logger.error("ledger type {} not present in ledgers so "
+                         "cannot set state".format(ledgerType))
             return
-        self.ledgers[typ]["state"] = state
+        self.ledgers[ledgerType].state = state
 
     def setLedgerCanSync(self, typ: int, canSync: bool):
         if typ not in self.ledgers:
