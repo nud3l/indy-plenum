@@ -302,20 +302,20 @@ class LedgerManager(HasActionQueue):
         statusFromClient = self.getStack(frm) == self.clientstack
         if self.ownedByNode and statusFromClient:
             if ledgerId != POOL_LEDGER_ID:
-                logger.debug("{} received inappropriate ledger status {} from "
-                             "client {}".format(self, status, frm))
+                logger.debug("{} received inappropriate "
+                             "ledger status {} from client {}"
+                             .format(self, status, frm))
                 return
-            else:
-                if self.isLedgerSame(ledgerStatus):
-                    ledger = self.ledgers[POOL_LEDGER_ID]["ledger"]
-                    ledgerStatus = LedgerStatus(POOL_LEDGER_ID, ledger.size,
-                                                ledger.root_hash)
-                    self.sendTo(ledgerStatus, frm)
+            if self.isLedgerSame(ledgerStatus):
+                pool_ledger = self.ledgers[POOL_LEDGER_ID].ledger
+                ledgerStatus = LedgerStatus(POOL_LEDGER_ID, pool_ledger.size,
+                                            pool_ledger.root_hash)
+                self.sendTo(ledgerStatus, frm)
 
         # If a ledger is yet to sync and cannot sync right now,
         # then stash the ledger status to be processed later
-        if self.ledgers[ledgerId]["state"] != LedgerState.synced and \
-                not self.ledgers[ledgerId]["canSync"]:
+        ledger = self.ledgers[ledgerId]
+        if ledger.state != LedgerState.synced and not ledger.canSync:
             self.stashLedgerStatus(ledgerId, status, frm)
             return
 
@@ -325,19 +325,20 @@ class LedgerManager(HasActionQueue):
             consistencyProof = self.getConsistencyProof(ledgerStatus)
             self.sendTo(consistencyProof, frm)
 
-        if not self.isLedgerOld(ledgerStatus) and not statusFromClient:
-            # This node's ledger is not older so it will not receive a
-            # consistency proof unless the other node processes a transaction
-            # post sending this ledger status
-            self.recvdConsistencyProofs[ledgerId][frm] = None
-            self.ledgerStatusOk[ledgerId].add(frm)
-            if len(self.ledgerStatusOk[ledgerId]) == 2*self.owner.f:
-                logger.debug("{} found out from {} that its ledger of type {} "
-                             "is latest".
-                             format(self, self.ledgerStatusOk[ledgerId],
-                                    ledgerId))
-                if self.ledgers[ledgerId]["state"] != LedgerState.synced:
-                    self.catchupCompleted(ledgerId)
+        if self.isLedgerOld(ledgerStatus) or statusFromClient:
+            return
+
+        # This node's ledger is not older so it will not receive a
+        # consistency proof unless the other node processes a transaction
+        # post sending this ledger status
+        ledger.recvdConsistencyProofs[frm] = None
+        ledger.ledgerStatusOk.add(frm)
+        if len(ledger.ledgerStatusOk) == 2 * self.owner.f:
+            logger.debug("{} found out from {} that its "
+                         "ledger of type {} is latest".
+                         format(self, ledger.ledgerStatusOk, ledgerId))
+            if ledger.state != LedgerState.synced:
+                self.catchupCompleted(ledgerId)
 
     def processConsistencyProof(self, proof: ConsistencyProof, frm: str):
         logger.debug("{} received consistency proof: {} from {}".
