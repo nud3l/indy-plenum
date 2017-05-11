@@ -367,7 +367,8 @@ class PrimaryElector(PrimaryDecider):
 
         if sndrRep not in self.primaryDeclarations[instId]:
             self.primaryDeclarations[instId][sndrRep] = (prim.name,
-                                                         prim.ordSeqNo)
+                                                         prim.ordSeqNo,
+                                                         prim.ledgers)
 
             # If got more than 2f+1 primary declarations then in a position to
             # decide whether it is the primary or not `2f + 1` declarations
@@ -484,24 +485,27 @@ class PrimaryElector(PrimaryDecider):
                         self.reElectionProposals[instId].values()]
                 tieAmong = mostCommonElement(ties)
 
-                logger.debug("{} achieved reelection quorum, tie between {}".
-                             format(replica, ', '.join(tieAmong)),
-                             extra={"cli": True})
+                if tieAmong:
+                    logger.debug("{} achieved reelection quorum, tie between {}".
+                                 format(replica, ', '.join(tieAmong)),
+                                 extra={"cli": True})
 
-                self.setElectionDefaults(instId)
+                    self.setElectionDefaults(instId)
 
-                if not self.hasPrimaryReplica and not self.was_master_primary_in_prev_view:
-                    # There was a tie among this and some other node(s), so do a
-                    # random wait
-                    if replica.name in [_[0] for _ in tieAmong]:
-                        # Try to nominate self after a random delay but dont block
-                        # until that delay and because a nominate from another
-                        # node might be sent
-                        self._schedule(partial(self.nominateReplica, instId),
-                                       random.randint(1, 3))
-                    else:
-                        # Now try to nominate self again as there is a reelection
-                        self.nominateReplica(instId)
+                    if not self.hasPrimaryReplica and not self.was_master_primary_in_prev_view:
+                        # There was a tie among this and some other node(s), so do a
+                        # random wait
+                        if replica.name in [_[0] for _ in tieAmong]:
+                            # Try to nominate self after a random delay but dont block
+                            # until that delay and because a nominate from another
+                            # node might be sent
+                            self._schedule(partial(self.nominateReplica, instId),
+                                           random.randint(1, 3))
+                        else:
+                            # Now try to nominate self again as there is a reelection
+                            self.nominateReplica(instId)
+                else:
+                    self.nominateReplica(instId)
             else:
                 logger.debug("{} does not have re-election quorum yet. "
                              "Got only {}".format(replica,
@@ -598,68 +602,74 @@ class PrimaryElector(PrimaryDecider):
         #   if there is an acceptable ordered state found, send primary else send re-election else
         # else wait for timer to expire
 
-        if self.hasNominationsFromAll(instId):
+        if self.hasNominationsFromAll(instId) or (
+                        self.scheduledPrimaryDecisions[instId] is not None and
+                        self.hasPrimaryDecisionTimerExpired(instId)):
             logger.debug("{} has got all nominations".
                          format(replica))
             acceptable_state = self.get_acceptable_last_ordered_state(instId)
             if acceptable_state is not None:
-                primaryCandidates = self.get_primary_candidates(instId,
+                primary_candidates = self.get_primary_candidates(instId,
                                                                 acceptable_state)
-                if len(primaryCandidates) == 1:
-                    primaryName, votes = primaryCandidates.pop()
+                if len(primary_candidates) == 1:
+                    primaryName, votes = primary_candidates.pop()
                     self.sendPrimary(instId, primaryName, *acceptable_state)
+                else:
+                    self.sendReelection(instId,
+                                        [n[0] for n in primary_candidates])
             else:
-                self.sendReelection(instId,
-                                    [n[0] for n in primaryCandidates])
+                self.sendReelection(instId)
+        else:
+            self.schedulePrimaryDecision(instId)
 
             # In case of one clear winner
-            if len(primaryCandidates) == 1 and acceptable_state is not None:
-                primaryName, votes = primaryCandidates.pop()
-                if self.hasNominationsFromAll(instId) or (
-                        self.scheduledPrimaryDecisions[instId] is not None and
-                        self.hasPrimaryDecisionTimerExpired(instId)):
-                    logger.debug("{} has nominations from all so sending "
-                                 "primary".format(replica))
-                    self.sendPrimary(instId, primaryName, seq_no)
-                else:
-                    votesNeeded = math.ceil((self.nodeCount + 1) / 2.0)
-                    if votes >= votesNeeded or (
-                        self.scheduledPrimaryDecisions[instId] is not None and
-                        self.hasPrimaryDecisionTimerExpired(instId)):
-                        logger.debug("{} does not have nominations from "
-                                     "all but has {} votes for {} so sending "
-                                     "primary".
-                                     format(replica, votes, primaryName))
-                        self.sendPrimary(instId, primaryName, seq_no)
-                        return
-                    else:
-                        logger.debug("{} has {} nominations for {}, but "
-                                     "needs {}".format(replica, votes,
-                                                       primaryName,
-                                                       votesNeeded))
-                        self.schedulePrimaryDecision(instId)
-                        return
-            else:
-                logger.debug("{} has {} nominations. Attempting "
-                             "reelection".
-                             format(replica, self.nominations[instId]))
-                if self.hasNominationsFromAll(instId) or (
-                        self.scheduledPrimaryDecisions[instId] is not None and
-                        self.hasPrimaryDecisionTimerExpired(instId)):
-                    logger.info("{} proposing re-election".format(replica),
-                                extra={"cli": True, "tags": ['node-election']})
-                    self.sendReelection(instId,
-                                        [n[0] for n in primaryCandidates])
-                else:
-                    # Does not have enough nominations for a re-election so wait
-                    # for some time to get nominations from remaining nodes
-                    logger.debug("{} waiting for more nominations".
-                                 format(replica))
-                    self.schedulePrimaryDecision(instId)
+            # if len(primary_candidates) == 1 and acceptable_state is not None:
+            #     primaryName, votes = primary_candidates.pop()
+            #     if self.hasNominationsFromAll(instId) or (
+            #             self.scheduledPrimaryDecisions[instId] is not None and
+            #             self.hasPrimaryDecisionTimerExpired(instId)):
+            #         logger.debug("{} has nominations from all so sending "
+            #                      "primary".format(replica))
+            #         self.sendPrimary(instId, primaryName, seq_no)
+            #     else:
+            #         votesNeeded = math.ceil((self.nodeCount + 1) / 2.0)
+            #         if votes >= votesNeeded or (
+            #             self.scheduledPrimaryDecisions[instId] is not None and
+            #             self.hasPrimaryDecisionTimerExpired(instId)):
+            #             logger.debug("{} does not have nominations from "
+            #                          "all but has {} votes for {} so sending "
+            #                          "primary".
+            #                          format(replica, votes, primaryName))
+            #             self.sendPrimary(instId, primaryName, seq_no)
+            #             return
+            #         else:
+            #             logger.debug("{} has {} nominations for {}, but "
+            #                          "needs {}".format(replica, votes,
+            #                                            primaryName,
+            #                                            votesNeeded))
+            #             self.schedulePrimaryDecision(instId)
+            #             return
+            # else:
+            #     logger.debug("{} has {} nominations. Attempting "
+            #                  "reelection".
+            #                  format(replica, self.nominations[instId]))
+            #     if self.hasNominationsFromAll(instId) or (
+            #             self.scheduledPrimaryDecisions[instId] is not None and
+            #             self.hasPrimaryDecisionTimerExpired(instId)):
+            #         logger.info("{} proposing re-election".format(replica),
+            #                     extra={"cli": True, "tags": ['node-election']})
+            #         self.sendReelection(instId,
+            #                             [n[0] for n in primary_candidates])
+            #     else:
+            #         # Does not have enough nominations for a re-election so wait
+            #         # for some time to get nominations from remaining nodes
+            #         logger.debug("{} waiting for more nominations".
+            #                      format(replica))
+            #         self.schedulePrimaryDecision(instId)
 
-        else:
-            logger.debug("{} has not got nomination quorum yet".
-                         format(replica))
+        # else:
+        #     logger.debug("{} has not got nomination quorum yet".
+        #                  format(replica))
 
     def sendNomination(self, name: str, instId: int, viewNo: int,
                        last_ordered_seq_no: int, ledgers):
@@ -700,8 +710,7 @@ class PrimaryElector(PrimaryDecider):
         """
         replica = self.replicas[instId]
         self.reElectionRounds[instId] += 1
-        primaryCandidates = primaryCandidates if primaryCandidates \
-            else self.get_primary_candidates(instId)
+        primaryCandidates = primaryCandidates or []
         self.reElectionProposals[instId][replica.name] = primaryCandidates
         self.scheduledPrimaryDecisions[instId] = None
         logger.debug("{} declaring reelection round {} for: {}".

@@ -144,8 +144,7 @@ Reelection = TaggedTuple(REELECTION, [
     f.INST_ID,
     f.ROUND,
     f.VIEW_NO,
-    f.TIE_AMONG,
-    f.CONFLICTS])
+    f.TIE_AMONG])
 
 
 BlacklistMsg = NamedTuple(BLACKLIST, [
