@@ -352,31 +352,28 @@ class LedgerManager(HasActionQueue):
 
     def canProcessConsistencyProof(self, proof: ConsistencyProof) -> bool:
         ledgerId = getattr(proof, f.LEDGER_ID.nm)
-        if self.ledgers[ledgerId]["state"] == LedgerState.not_synced and \
-                self.ledgers[ledgerId]["canSync"]:
-            start, end = getattr(proof, f.SEQ_NO_START.nm), \
-                         getattr(proof, f.SEQ_NO_END.nm)
-            # TODO: Should we discard where start is older than the ledger size
-            ledgerSize = self.ledgers[ledgerId]["ledger"].size
-            if start > ledgerSize:
-                self.discard(proof, reason="Start {} is greater than "
-                                           "ledger size {}".
-                             format(start, ledgerSize),
-                             logMethod=logger.warn)
-                return False
-            elif end <= start:
-                self.discard(proof, reason="End {} is not greater than "
-                                           "start {}".format(end, start),
-                             logMethod=logger.warn)
-                return False
-            else:
-                return True
-        else:
-            logger.debug("{} cannot process consistency proof since in state {}"
-                         " and canSync is {}".
-                format(self, self.ledgers[ledgerId]["state"],
-                self.ledgers[ledgerId]["canSync"]))
+        ledger = self.ledgers[ledgerId]
+        if ledger.state != LedgerState.not_synced or not ledger.canSync:
+            logger.debug("{} cannot process consistency "
+                         "proof since in state {} and canSync is {}"
+                         .format(self, ledger.state, ledger.canSync))
+
+        start = getattr(proof, f.SEQ_NO_START.nm)
+        end = getattr(proof, f.SEQ_NO_END.nm)
+        # TODO: Should we discard where start is older than the ledger size
+        ledgerSize = ledger.ledger.size
+        if start > ledgerSize:
+            self.discard(proof, reason="Start {} is greater than "
+                                       "ledger size {}".
+                         format(start, ledgerSize),
+                         logMethod=logger.warn)
             return False
+        if end <= start:
+            self.discard(proof, reason="End {} is not greater than "
+                                       "start {}".format(end, start),
+                         logMethod=logger.warn)
+            return False
+        return True
 
     def processCatchupReq(self, req: CatchupReq, frm: str):
         logger.debug("{} received catchup request: {} from {}".
