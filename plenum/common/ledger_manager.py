@@ -210,14 +210,14 @@ class LedgerManager(HasActionQueue):
             logger.error("ledger type {} not present in ledgers so "
                          "cannot set state".format(ledgerType))
             return
-        self.ledgers[ledgerType].state = state
+        self.getLedgerInfoByType(ledgerType).state = state
 
     def setLedgerCanSync(self, ledgerType: int, canSync: bool):
         if ledgerType not in self.ledgers:
             logger.error("ledger type {} not present in ledgers so "
                          "cannot set state".format(ledgerType))
             return
-        self.ledgers[ledgerType].canSync = canSync
+        self.getLedgerInfoByType(ledgerType).canSync = canSync
 
     def processLedgerStatus(self, status: LedgerStatus, frm: str):
         logger.debug("{} received ledger status: {} from {}".
@@ -247,15 +247,17 @@ class LedgerManager(HasActionQueue):
                              .format(self, status, frm))
                 return
             if self.isLedgerSame(ledgerStatus):
-                pool_ledger = self.ledgers[POOL_LEDGER_ID].ledger
-                ledgerStatus = LedgerStatus(POOL_LEDGER_ID, pool_ledger.size,
-                                            pool_ledger.root_hash)
+                ledgerInfo = self.getLedgerInfoByType(POOL_LEDGER_ID)
+                poolLedger = ledgerInfo.ledger
+                ledgerStatus = LedgerStatus(POOL_LEDGER_ID,
+                                            poolLedger.size,
+                                            poolLedger.root_hash)
                 self.sendTo(ledgerStatus, frm)
 
         # If a ledger is yet to sync and cannot sync right now,
         # then stash the ledger status to be processed later
-        ledger = self.ledgers[ledgerId]
-        if ledger.state != LedgerState.synced and not ledger.canSync:
+        ledgerInfo = self.getLedgerInfoByType(ledgerId)
+        if ledgerInfo.state != LedgerState.synced and not ledgerInfo.canSync:
             self.stashLedgerStatus(ledgerId, status, frm)
             return
 
@@ -271,13 +273,13 @@ class LedgerManager(HasActionQueue):
         # This node's ledger is not older so it will not receive a
         # consistency proof unless the other node processes a transaction
         # post sending this ledger status
-        ledger.recvdConsistencyProofs[frm] = None
-        ledger.ledgerStatusOk.add(frm)
-        if len(ledger.ledgerStatusOk) == 2 * self.owner.f:
+        ledgerInfo.recvdConsistencyProofs[frm] = None
+        ledgerInfo.ledgerStatusOk.add(frm)
+        if len(ledgerInfo.ledgerStatusOk) == 2 * self.owner.f:
             logger.debug("{} found out from {} that its "
                          "ledger of type {} is latest".
-                         format(self, ledger.ledgerStatusOk, ledgerId))
-            if ledger.state != LedgerState.synced:
+                         format(self, ledgerInfo.ledgerStatusOk, ledgerId))
+            if ledgerInfo.state != LedgerState.synced:
                 self.catchupCompleted(ledgerId)
 
     def processConsistencyProof(self, proof: ConsistencyProof, frm: str):
@@ -285,23 +287,24 @@ class LedgerManager(HasActionQueue):
                      format(self, proof, frm))
         ledgerId = getattr(proof, f.LEDGER_ID.nm)
         if self.canProcessConsistencyProof(proof):
-            self.ledgers[ledgerId].recvdConsistencyProofs[frm] = ConsistencyProof(*proof)
+            ledgerInfo = self.getLedgerInfoByType(ledgerId)
+            ledgerInfo.recvdConsistencyProofs[frm] = ConsistencyProof(*proof)
             canCatchup, catchUpFrm = self.canStartCatchUpProcess(ledgerId)
             if canCatchup:
                 self.startCatchUpProcess(ledgerId, catchUpFrm)
 
     def canProcessConsistencyProof(self, proof: ConsistencyProof) -> bool:
         ledgerId = getattr(proof, f.LEDGER_ID.nm)
-        ledger = self.ledgers[ledgerId]
-        if ledger.state != LedgerState.not_synced or not ledger.canSync:
+        ledgerInfo = self.getLedgerInfoByType(ledgerId)
+        if ledgerInfo.state != LedgerState.not_synced or not ledgerInfo.canSync:
             logger.debug("{} cannot process consistency "
                          "proof since in state {} and canSync is {}"
-                         .format(self, ledger.state, ledger.canSync))
+                         .format(self, ledgerInfo.state, ledgerInfo.canSync))
 
         start = getattr(proof, f.SEQ_NO_START.nm)
         end = getattr(proof, f.SEQ_NO_END.nm)
         # TODO: Should we discard where start is older than the ledger size
-        ledgerSize = ledger.ledger.size
+        ledgerSize = ledgerInfo.ledger.size
         if start > ledgerSize:
             self.discard(proof, reason="Start {} is greater than "
                                        "ledger size {}".
@@ -364,16 +367,16 @@ class LedgerManager(HasActionQueue):
             return
 
         ledgerId = getattr(rep, f.LEDGER_ID.nm)
-        ledger = self.ledgers[ledgerId]
+        ledgerInfo = self.getLedgerInfoByType(ledgerId)
 
         reallyLedger = self.getLedgerForMsg(rep)
 
-        if frm not in ledger.recvdCatchupRepliesFrm:
-            ledger.recvdCatchupRepliesFrm[frm] = []
+        if frm not in ledgerInfo.recvdCatchupRepliesFrm:
+            ledgerInfo.recvdCatchupRepliesFrm[frm] = []
 
-        ledger.recvdCatchupRepliesFrm[frm].append(rep)
+        ledgerInfo.recvdCatchupRepliesFrm[frm].append(rep)
 
-        catchUpReplies = ledger.receivedCatchUpReplies
+        catchUpReplies = ledgerInfo.receivedCatchUpReplies
         # Creating a list of txns sorted on the basis of sequence
         # numbers
         logger.debug("{} merging all received catchups".format(self))
@@ -392,10 +395,10 @@ class LedgerManager(HasActionQueue):
                                              catchUpReplies[
                                              :numProcessed]]))
 
-        ledger.receivedCatchUpReplies = catchUpReplies[numProcessed:]
-        if getattr(ledger.catchUpTill, f.SEQ_NO_END.nm) == reallyLedger.size:
-            cp = ledger.catchUpTill
-            ledger.catchUpTill = None
+        ledgerInfo.receivedCatchUpReplies = catchUpReplies[numProcessed:]
+        if getattr(ledgerInfo.catchUpTill, f.SEQ_NO_END.nm) == reallyLedger.size:
+            cp = ledgerInfo.catchUpTill
+            ledgerInfo.catchUpTill = None
             self.catchupCompleted(ledgerId, cp.ppSeqNo)
 
     def _processCatchupReplies(self, ledgerId, ledger: Ledger,
