@@ -204,7 +204,6 @@ class LedgerManager(HasActionQueue):
         timeout = int(self._getCatchupTimeout(len(cReqs), batchSize))
         self._schedule(partial(self.checkIfTxnsNeeded, ledgerId), timeout)
 
-
     def setLedgerState(self, ledgerType: int, state: LedgerState):
         if ledgerType not in self.ledgers:
             logger.error("ledger type {} not present in ledgers so "
@@ -367,16 +366,16 @@ class LedgerManager(HasActionQueue):
             return
 
         ledgerId = getattr(rep, f.LEDGER_ID.nm)
-        ledgerInfo = self.getLedgerInfoByType(ledgerId)
+        ledger = self.getLedgerInfoByType(ledgerId)
 
         reallyLedger = self.getLedgerForMsg(rep)
 
-        if frm not in ledgerInfo.recvdCatchupRepliesFrm:
-            ledgerInfo.recvdCatchupRepliesFrm[frm] = []
+        if frm not in ledger.recvdCatchupRepliesFrm:
+            ledger.recvdCatchupRepliesFrm[frm] = []
 
-        ledgerInfo.recvdCatchupRepliesFrm[frm].append(rep)
+        ledger.recvdCatchupRepliesFrm[frm].append(rep)
 
-        catchUpReplies = ledgerInfo.receivedCatchUpReplies
+        catchUpReplies = ledger.receivedCatchUpReplies
         # Creating a list of txns sorted on the basis of sequence
         # numbers
         logger.debug("{} merging all received catchups".format(self))
@@ -395,10 +394,10 @@ class LedgerManager(HasActionQueue):
                                              catchUpReplies[
                                              :numProcessed]]))
 
-        ledgerInfo.receivedCatchUpReplies = catchUpReplies[numProcessed:]
-        if getattr(ledgerInfo.catchUpTill, f.SEQ_NO_END.nm) == reallyLedger.size:
-            cp = ledgerInfo.catchUpTill
-            ledgerInfo.catchUpTill = None
+        ledger.receivedCatchUpReplies = catchUpReplies[numProcessed:]
+        if getattr(ledger.catchUpTill, f.SEQ_NO_END.nm) == reallyLedger.size:
+            cp = ledger.catchUpTill
+            ledger.catchUpTill = None
             self.catchupCompleted(ledgerId, cp.ppSeqNo)
 
     def _processCatchupReplies(self, ledgerId, ledger: Ledger,
@@ -808,7 +807,7 @@ class LedgerManager(HasActionQueue):
 
     def getLedgerInfoByType(self, ledgerType):
         if ledgerType not in self.ledgers:
-            raise ValueError("Invalid ledger type")
+            raise ValueError("Invalid ledger type: {}".format(ledgerType))
         return self.ledgers[ledgerType]
 
     def appendToLedger(self, ledgerId: int, txn: Any) -> Dict:
@@ -862,9 +861,7 @@ class LedgerManager(HasActionQueue):
 
     @property
     def clientstack(self):
-        if self.ownedByNode:
-            return self.owner.clientstack
-        logger.debug("{} trying to get clientstack".format(self))
+        return self.owner.clientstack if self.ownedByNode else None
 
     @property
     def send(self):
