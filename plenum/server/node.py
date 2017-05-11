@@ -1402,7 +1402,6 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
             rh.updateState([txn])
             state = self.getState(ledgerId)
             state.commit(rootHash=state.headHash)
-            ledger = self.getLedger(ledgerId)
 
     def postTxnFromCatchup(self, ledgerId: int, txn: Any):
         rh = None
