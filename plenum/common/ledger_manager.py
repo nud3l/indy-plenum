@@ -182,86 +182,87 @@ class LedgerManager(HasActionQueue):
 
         if totalMissing == 0:
             ledger.catchupReplyTimer = None
-        else:
-            logger.debug("{} requesting {} missing transactions "
-                         "after timeout".format(self, totalMissing))
-            eligibleNodes = list(self.nodestack.conns -
-                                 self.blacklistedNodes)
-            # Shuffling order of nodes so that catchup requests don't go to
-            # the same nodes. This is done to avoid scenario where a node
-            # does not reply at all.
-            # TODO: Need some way to detect nodes that are not responding.
+            return
 
+        logger.debug("{} requesting {} missing transactions "
+                     "after timeout".format(self, totalMissing))
+        eligibleNodes = list(self.nodestack.conns -
+                             self.blacklistedNodes)
+
+        if not eligibleNodes:
             # TODO: What if all nodes are blacklisted so `eligibleNodes`
             # is empty? It will lead to divide by 0. This should not happen
             #  but its happening.
             # https://www.pivotaltracker.com/story/show/130602115
-            if not eligibleNodes:
-                logger.error("{} could not find any node to request "
-                             "transactions from. Catchup process cannot "
-                             "move ahead.".format(self))
-                return
-            shuffle(eligibleNodes)
-            batchSize = math.ceil(totalMissing/len(eligibleNodes))
-            cReqs = []
-            lastSeenSeqNo = ledger.size
-            leftMissing = totalMissing
+            logger.error("{} could not find any node to request "
+                         "transactions from. Catchup process cannot "
+                         "move ahead.".format(self))
+            return
 
-            def addReqsForMissing(frm, to):
-                # Add Catchup requests for missing transactions. `frm` and
-                # `to` are inclusive
-                missing = to - frm + 1
-                numBatches = int(math.ceil(missing / batchSize))
-                for i in range(numBatches):
-                    s = frm + (i * batchSize)
-                    e = min(to, frm + ((i + 1) * batchSize) - 1)
-                    req = CatchupReq(ledgerId, s, e, end)
-                    logger.debug("{} creating catchup request {} to {} till {}".
-                                 format(self, s, e, end))
-                    cReqs.append(req)
-                return missing
+        # Shuffling order of nodes so that catchup requests don't go to
+        # the same nodes. This is done to avoid scenario where a node
+        # does not reply at all.
+        # TODO: Need some way to detect nodes that are not responding.
+        shuffle(eligibleNodes)
+        batchSize = math.ceil(totalMissing/len(eligibleNodes))
+        cReqs = []
+        lastSeenSeqNo = ledger.size
+        leftMissing = totalMissing
 
-            for seqNo, txn in catchUpReplies:
-                if (seqNo - lastSeenSeqNo) != 1:
-                    missing = addReqsForMissing(lastSeenSeqNo+1, seqNo-1)
-                    leftMissing -= missing
-                lastSeenSeqNo = seqNo
+        def addReqsForMissing(frm, to):
+            # Add Catchup requests for missing transactions.
+            # `frm` and `to` are inclusive
+            missing = to - frm + 1
+            numBatches = int(math.ceil(missing / batchSize))
+            for i in range(numBatches):
+                s = frm + (i * batchSize)
+                e = min(to, frm + ((i + 1) * batchSize) - 1)
+                req = CatchupReq(ledgerId, s, e, end)
+                logger.debug("{} creating catchup request {} to {} till {}".
+                             format(self, s, e, end))
+                cReqs.append(req)
+            return missing
 
-            # If still missing some transactions from request has not been
-            # sent then either `catchUpReplies` was empty or it did not have
-            #  transactions till `end`
-            if leftMissing > 0:
-                logger.debug("{} still missing {} transactions after "
-                             "looking at receivedCatchUpReplies".
-                             format(self, leftMissing))
-                # `catchUpReplies` was empty
-                if lastSeenSeqNo == ledger.size:
-                    missing = addReqsForMissing(ledger.size+1, end)
-                    leftMissing -= missing
-                # did not have transactions till `end`
-                elif lastSeenSeqNo != end:
-                    missing = addReqsForMissing(lastSeenSeqNo + 1, end)
-                    leftMissing -= missing
-                else:
-                    logger.error("{} still missing {} transactions. "
-                                 "Something happened which was not thought "
-                                 "of. {} {} {}"
-                                 .format(self, leftMissing, start, end,
-                                         lastSeenSeqNo))
-                if leftMissing:
-                    logger.error(
-                        "{} still missing {} transactions. {} {} {}"
-                            .format(self, leftMissing, start, end,
-                                    lastSeenSeqNo))
+        for seqNo, txn in catchUpReplies:
+            if (seqNo - lastSeenSeqNo) != 1:
+                missing = addReqsForMissing(lastSeenSeqNo+1, seqNo-1)
+                leftMissing -= missing
+            lastSeenSeqNo = seqNo
 
-            numElgNodes = len(eligibleNodes)
-            for i, req in enumerate(cReqs):
-                nodeName = eligibleNodes[i%numElgNodes]
-                self.send(req, self.nodestack.getRemote(nodeName).uid)
+        # If still missing some transactions from request has not been
+        # sent then either `catchUpReplies` was empty or it did not have
+        #  transactions till `end`
+        if leftMissing > 0:
+            logger.debug("{} still missing {} transactions after "
+                         "looking at receivedCatchUpReplies".
+                         format(self, leftMissing))
+            # `catchUpReplies` was empty
+            if lastSeenSeqNo == ledger.size:
+                missing = addReqsForMissing(ledger.size+1, end)
+                leftMissing -= missing
+            # did not have transactions till `end`
+            elif lastSeenSeqNo != end:
+                missing = addReqsForMissing(lastSeenSeqNo + 1, end)
+                leftMissing -= missing
+            else:
+                logger.error("{} still missing {} transactions. "
+                             "Something happened which was not thought "
+                             "of. {} {} {}"
+                             .format(self, leftMissing, start, end,
+                                     lastSeenSeqNo))
+            if leftMissing:
+                logger.error("{} still missing {} transactions. {} {} {}"
+                             .format(self, leftMissing,
+                                     start, end, lastSeenSeqNo))
 
-            ledger.catchupReplyTimer = time.perf_counter()
-            timeout = int(self._getCatchupTimeout(len(cReqs), batchSize))
-            self._schedule(partial(self.checkIfTxnsNeeded, ledgerId), timeout)
+        numElgNodes = len(eligibleNodes)
+        for i, req in enumerate(cReqs):
+            nodeName = eligibleNodes[i%numElgNodes]
+            self.send(req, self.nodestack.getRemote(nodeName).uid)
+
+        ledger.catchupReplyTimer = time.perf_counter()
+        timeout = int(self._getCatchupTimeout(len(cReqs), batchSize))
+        self._schedule(partial(self.checkIfTxnsNeeded, ledgerId), timeout)
 
 
     def setLedgerState(self, typ: int, state: LedgerState):
