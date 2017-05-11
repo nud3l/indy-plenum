@@ -475,11 +475,11 @@ class LedgerManager(HasActionQueue):
                 result, nodeName, toBeProcessed = self.hasValidCatchupReplies(
                     ledgerId, ledger, seqNo, catchUpReplies)
                 if result:
+                    ledgerInfo = self.getLedgerInfoByType(ledgerId)
                     for _, txn in catchUpReplies[:toBeProcessed]:
                         merkleInfo = ledger.add(txn)
                         txn[F.seqNo.name] = merkleInfo[F.seqNo.name]
-                        self.ledgers[ledgerId]["postTxnAddedToLedgerClbk"](
-                            ledgerId, txn)
+                        ledgerInfo.postTxnAddedToLedgerClbk(ledgerId, txn)
                     self._removePrcdCatchupReply(ledgerId, nodeName, seqNo)
                     return numProcessed + toBeProcessed + \
                         self._processCatchupReplies(ledgerId, ledger,
@@ -499,10 +499,11 @@ class LedgerManager(HasActionQueue):
         return numProcessed
 
     def _removePrcdCatchupReply(self, ledgerId, node, seqNo):
-        for i, rep in enumerate(self.recvdCatchupRepliesFrm[ledgerId][node]):
+        ledgerInfo = self.getLedgerInfoByType(ledgerId)
+        for i, rep in enumerate(ledgerInfo.recvdCatchupRepliesFrm[node]):
             if str(seqNo) in getattr(rep, f.TXNS.nm):
                 break
-        self.recvdCatchupRepliesFrm[ledgerId][node].pop(i)
+        ledgerInfo.recvdCatchupRepliesFrm[node].pop(i)
 
     def hasValidCatchupReplies(self, ledgerId, ledger, seqNo, catchUpReplies):
         # Here seqNo has to be the seqNo of first transaction of
@@ -525,8 +526,11 @@ class LedgerManager(HasActionQueue):
         tempTree = ledger.treeWithAppliedTxns(txns)
 
         proof = getattr(catchupReply, f.CONS_PROOF.nm)
-        verifier = self.ledgers[ledgerId]["verifier"]
-        cp = self.catchUpTill[ledgerId]
+
+
+        ledgerInfo = self.getLedgerInfoByType(ledgerId)
+        verifier = ledgerInfo.verifier
+        cp = ledgerInfo.catchUpTill
         finalSize = getattr(cp, f.SEQ_NO_END.nm)
         finalMTH = getattr(cp, f.NEW_MERKLE_ROOT.nm)
         try:
@@ -549,7 +553,9 @@ class LedgerManager(HasActionQueue):
     def _getCatchupReplyForSeqNo(self, ledgerId, seqNo):
         # This is inefficient if we have large number of nodes but since
         # number of node are always between 60-120, this is ok.
-        for k, catchupReps in self.recvdCatchupRepliesFrm[ledgerId].items():
+
+        ledgerInfo = self.getLedgerInfoByType(ledgerId)
+        for k, catchupReps in ledgerInfo.recvdCatchupRepliesFrm.items():
             for rep in catchupReps:
                 txns = getattr(rep, f.TXNS.nm)
                 # Transfers of odcits in RAET converts integer keys to string
@@ -567,7 +573,8 @@ class LedgerManager(HasActionQueue):
         ledgerId = getattr(req, f.LEDGER_ID.nm)
         seqNoStart = getattr(req, f.SEQ_NO_START.nm)
         seqNoEnd = getattr(req, f.SEQ_NO_END.nm)
-        consistencyProof = self._buildConsistencyProof(ledgerId, seqNoStart,
+        consistencyProof = self._buildConsistencyProof(ledgerId,
+                                                       seqNoStart,
                                                        seqNoEnd)
         # TODO: Build a test for this scenario where a node cannot service a
         # consistency proof request
@@ -576,39 +583,42 @@ class LedgerManager(HasActionQueue):
 
     def canProcessCatchupReply(self, catchupReply: CatchupRep) -> List[Tuple]:
         ledgerId = getattr(catchupReply, f.LEDGER_ID.nm)
-        if self.ledgers[ledgerId]["state"] == LedgerState.syncing:
-            ledger = self.getLedgerForMsg(catchupReply)
-            # Not relying on a node sending txns in order of sequence no
-            txns = sorted([(int(s), t) for (s, t) in
-                           getattr(catchupReply, f.TXNS.nm).items()],
-                          key=operator.itemgetter(0))
-            anyNew = any([s > ledger.size for s, _ in txns])
-            # The transactions should be contiguous in terms of sequence numbers
-            noGapsOrDups = len(txns) == 0 or \
-                    (len(txns) == (txns[-1][0] - txns[0][0] + 1))
-            if not anyNew:
-                self.discard(catchupReply,
-                             reason="ledger has size {} and it already contains"
-                                    " all transactions in the reply".
-                             format(ledger.size), logMethod=logger.info)
-            if not noGapsOrDups:
-                self.discard(catchupReply,
-                             reason="contains duplicates or gaps",
-                             logMethod=logger.info)
-            if anyNew and noGapsOrDups:
-                return txns
-        else:
+        ledgerState = self.getLedgerInfoByType(ledgerId).state
+        if ledgerState != LedgerState.syncing:
             logger.debug("{} cannot process catchup reply {} since ledger "
                          "is in state {}".
-                         format(self, catchupReply,
-                                self.ledgers[ledgerId]["state"]))
+                         format(self, catchupReply, ledgerState))
+            return []
+
+        ledger = self.getLedgerForMsg(catchupReply)
+        # Not relying on a node sending txns in order of sequence no
+        txns = sorted([(int(s), t) for (s, t) in
+                       getattr(catchupReply, f.TXNS.nm).items()],
+                      key=operator.itemgetter(0))
+        anyNew = any([s > ledger.size for s, _ in txns])
+        # The transactions should be contiguous in terms of sequence numbers
+        noGapsOrDups = len(txns) == 0 or \
+                (len(txns) == (txns[-1][0] - txns[0][0] + 1))
+        if not anyNew:
+            self.discard(catchupReply,
+                         reason="ledger has size {} and it already contains"
+                                " all transactions in the reply".
+                         format(ledger.size), logMethod=logger.info)
+        if not noGapsOrDups:
+            self.discard(catchupReply,
+                         reason="contains duplicates or gaps",
+                         logMethod=logger.info)
+        if anyNew and noGapsOrDups:
+            return txns
+
 
     # ASSUMING NO MALICIOUS NODES
     # Assuming that all nodes have the same state of the system and no node
     # is lagging behind. So if two new nodes are added in quick succession in a
     # high traffic environment, this logic is faulty
     def canStartCatchUpProcess(self, ledgerId: int):
-        recvdConsProof = self.recvdConsistencyProofs[ledgerId]
+        ledgerInfo = self.getLedgerInfoByType(ledgerId)
+        recvdConsProof = ledgerInfo.recvdConsistencyProofs
         # Consider an f value when this node was not connected
         adjustedF = getMaxFailures(self.owner.totalNodes - 1)
         if len(recvdConsProof) == (adjustedF+1):
@@ -617,25 +627,24 @@ class LedgerManager(HasActionQueue):
             # Start timer that will expire in some time and if till that time
             # enough CPs are not received, then explicitly request CPs
             # from other nodes, see `checkIfCPsNeeded`
-            self.consistencyProofsTimers[ledgerId] = time.perf_counter()
+
+            ledgerInfo.consistencyProofsTimer = time.perf_counter()
             self._schedule(partial(self.checkIfCPsNeeded, ledgerId),
                            self.config.ConsistencyProofsTimeout * (
                                self.owner.totalNodes - 1))
-        if len(recvdConsProof) > 2*adjustedF:
+        if len(recvdConsProof) > 2 * adjustedF:
             logger.debug("{} deciding on the basis of CPs {} and f {}".
                          format(self, recvdConsProof, adjustedF))
             grpdPrf, nullProofs = self._groupConsistencyProofs(recvdConsProof)
-
             # If more than f nodes were found to be at the same state then this
             #  node's state is good too
             if nullProofs > adjustedF:
                 return True, None
-
             result = self._latestReliableProof(grpdPrf,
-                                               self.ledgers[ledgerId]["ledger"])
+                                               ledgerInfo.ledger)
+            cp = ConsistencyProof(ledgerId, *result) if result else None
+            return bool(result),cp
 
-            return bool(result), (None if not result else ConsistencyProof(
-                ledgerId, *result))
         logger.debug("{} cannot start catchup since received only {} "
                      "consistency proofs but need at least {}".
                      format(self, len(recvdConsProof), 2*adjustedF + 1))
@@ -701,8 +710,10 @@ class LedgerManager(HasActionQueue):
         # lowest since that might not be enough as some nodes must be lagging
         # behind a lot or some malicious nodes might send low sequence numbers.
         proofs = sorted(groupedProofs.items(), key=lambda t: max(t[1].values()))
-        ledger = self.ledgers[ledgerId]["ledger"]
-        return ConsProofRequest(ledgerId, ledger.size, proofs[len(proofs) // 2][0][1])
+        ledger = self.getLedgerInfoByType(ledgerId).ledger
+        return ConsProofRequest(ledgerId,
+                                ledger.size,
+                                proofs[len(proofs) // 2][0][1])
 
     def startCatchUpProcess(self, ledgerId: int, proof: ConsistencyProof):
         logger.debug("{} started catching up with consistency proof {}".
@@ -711,49 +722,55 @@ class LedgerManager(HasActionQueue):
             self.discard(proof, reason="Unknown ledger type {}".
                          format(ledgerId))
             return
-        self.ledgers[ledgerId]["state"] = LedgerState.syncing
-        self.consistencyProofsTimers[ledgerId] = None
-        self.recvdConsistencyProofs[ledgerId] = {}
-        if proof is not None:
-            self.ledgers[ledgerId]["state"] = LedgerState.syncing
-            p = ConsistencyProof(*proof)
-            rids = [self.nodestack.getRemote(nm).uid for nm in
-                    self.nodestack.conns]
-            reqs = self.getCatchupReqs(p)
-            for req in zip(reqs, rids):
-                self.send(*req)
-            self.catchUpTill[ledgerId] = p
-            if reqs:
-                self.catchupReplyTimers[ledgerId] = time.perf_counter()
-                timeout = self._getCatchupTimeout(
-                    len(reqs),
-                    getattr(reqs[0], f.SEQ_NO_END.nm) -
-                    getattr(reqs[0], f.SEQ_NO_START.nm) + 1)
-                self._schedule(partial(self.checkIfTxnsNeeded, ledgerId),
-                               timeout)
-        else:
+
+        ledgerInfo = self.getLedgerInfoByType(ledgerId)
+        ledgerInfo.state = LedgerState.syncing
+        ledgerInfo.consistencyProofsTimer = None
+        ledgerInfo.recvdConsistencyProofs = {}
+
+        if proof is None:
             self.catchupCompleted(ledgerId)
+            return
+
+        ledgerInfo.state = LedgerState.syncing
+        p = ConsistencyProof(*proof)
+        rids = [self.nodestack.getRemote(nm).uid for nm in
+                self.nodestack.conns]
+        reqs = self.getCatchupReqs(p)
+        for req in zip(reqs, rids):
+            self.send(*req)
+        ledgerInfo.catchUpTill = p
+        if reqs:
+            ledgerInfo.catchupReplyTimer = time.perf_counter()
+            batchSize = getattr(reqs[0], f.SEQ_NO_END.nm) - \
+                        getattr(reqs[0], f.SEQ_NO_START.nm) + 1
+            timeout = self._getCatchupTimeout(len(reqs), batchSize)
+            self._schedule(partial(self.checkIfTxnsNeeded, ledgerId),
+                           timeout)
 
     def _getCatchupTimeout(self, numRequest, batchSize):
         return numRequest * (self.config.CatchupTransactionsTimeout +
-                             .1*batchSize)
+                             0.1 * batchSize)
 
     def catchupCompleted(self, ledgerId: int, lastPpSeqNo: int=-1):
         if self.lastCaughtUpPpSeqNo < lastPpSeqNo:
             self.lastCaughtUpPpSeqNo = lastPpSeqNo
 
-        self.catchupReplyTimers[ledgerId] = None
-        logger.debug("{} completed catching up ledger {}".format(self,
-                                                                 ledgerId))
+        ledgerInfo = self.getLedgerInfoByType(ledgerId)
+        ledgerInfo.catchupReplyTimer = None
+        logger.debug("{} completed catching up ledger {}"
+                     .format(self, ledgerId))
         if ledgerId not in self.ledgers:
             logger.error("{} called catchup completed for ledger {}".
                          format(self, ledgerId))
             return
-        self.ledgers[ledgerId]["canSync"] = False
-        self.ledgers[ledgerId]["state"] = LedgerState.synced
-        self.ledgers[ledgerId]["postCatchupCompleteClbk"]()
+
+        ledgerInfo.canSync = False
+        ledgerInfo.state = LedgerState.synced
+        ledgerInfo.postCatchupCompleteClbk()
+
         if self.postAllLedgersCaughtUp:
-            if all(LedgerState.synced == l["state"]
+            if all(l.state == LedgerState.synced
                    for l in self.ledgers.values()):
                 self.postAllLedgersCaughtUp()
 
@@ -766,8 +783,8 @@ class LedgerManager(HasActionQueue):
         s = start + 1
         e = min(s + batchLength - 1, end)
         for i in range(nodeCount):
-            reqs.append(CatchupReq(getattr(consProof, f.LEDGER_ID.nm),
-                                   s, e, end))
+            req = CatchupReq(getattr(consProof, f.LEDGER_ID.nm), s, e, end)
+            reqs.append(req)
             s = e + 1
             e = min(s + batchLength - 1, end)
             if s > end:
@@ -782,17 +799,21 @@ class LedgerManager(HasActionQueue):
         return self._buildConsistencyProof(ledgerId, seqNoStart, seqNoEnd)
 
     def _buildConsistencyProof(self, ledgerId, seqNoStart, seqNoEnd):
-        ledger = self.ledgers[ledgerId]["ledger"]
+
+        ledger = self.getLedgerInfoByType(ledgerId).ledger
+
         ledgerSize = ledger.size
         if seqNoStart > ledgerSize:
-            logger.error("{} cannot build consistency proof from {} since its "
-                         "ledger size is {}".format(self, seqNoStart,
-                                                    ledgerSize))
+            logger.error("{} cannot build consistency proof from {} "
+                         "since its ledger size is {}"
+                         .format(self, seqNoStart, ledgerSize))
             return
         if seqNoEnd > ledgerSize:
-            logger.error("{} cannot build consistency proof till {} since its "
-                         "ledger size is {}".format(self, seqNoEnd, ledgerSize))
+            logger.error("{} cannot build consistency "
+                         "proof till {} since its ledger size is {}"
+                         .format(self, seqNoEnd, ledgerSize))
             return
+
         if seqNoStart == 0:
             # Consistency proof for an empty tree cannot exist. Using the root
             # hash now so that the node which is behind can verify that
@@ -802,8 +823,8 @@ class LedgerManager(HasActionQueue):
         else:
             proof = ledger.tree.consistency_proof(seqNoStart, seqNoEnd)
             oldRoot = ledger.tree.merkle_tree_hash(0, seqNoStart)
-        newRoot = ledger.tree.merkle_tree_hash(0, seqNoEnd)
 
+        newRoot = ledger.tree.merkle_tree_hash(0, seqNoEnd)
         ppSeqNo = self.owner.ppSeqNoForTxnSeqNo(ledgerId, seqNoEnd)
         logger.debug('{} found ppSeqNo {} for ledger {} seqNo {}'.
                      format(self, ppSeqNo, ledgerId, seqNoEnd))
@@ -822,11 +843,9 @@ class LedgerManager(HasActionQueue):
         ledgerId = getattr(status, f.LEDGER_ID.nm)
         seqNo = getattr(status, f.TXN_SEQ_NO.nm)
         ledger = self.getLedgerForMsg(status)
-        logger.debug(
-            "{} comparing its ledger {} of size {} with {}".format(self,
-                                                                   ledgerId,
-                                                                   ledger.seqNo,
-                                                                   seqNo))
+        logger.debug("{} comparing its ledger {} "
+                     "of size {} with {}"
+                     .format(self,ledgerId, ledger.seqNo, seqNo))
         return ledger.seqNo - seqNo
 
     def isLedgerOld(self, status: LedgerStatus):
@@ -850,25 +869,20 @@ class LedgerManager(HasActionQueue):
         return self.ledgers[ledgerType]
 
     def appendToLedger(self, ledgerId: int, txn: Any) -> Dict:
-        if ledgerId not in self.ledgers:
-            logger.error("ledger type {} not present in ledgers so cannot add "
-                         "txn".format(ledgerId))
-            return
-        return self.ledgers[ledgerId]["ledger"].append(txn)
+        ledgerInfo = self.getLedgerInfoByType(ledgerId)
+        return ledgerInfo.ledger.append(txn)
 
     def stashLedgerStatus(self, ledgerId: int, status, frm: str):
         logger.debug("{} stashing ledger status {} from {}".
                      format(self, status, frm))
-        self.stashedLedgerStatuses[ledgerId].append((status, frm))
+        ledgerInfo = self.getLedgerInfoByType(ledgerId)
+        ledgerInfo.stashedLedgerStatuses.append((status, frm))
 
     def processStashedLedgerStatuses(self, ledgerId: int):
-        if ledgerId not in self.stashedLedgerStatuses:
-            logger.error("{} cannot process ledger of type {}".
-                         format(self, ledgerId))
-            return 0
+        ledgerInfo = self.getLedgerInfoByType(ledgerId)
         i = 0
-        while self.stashedLedgerStatuses[ledgerId]:
-            msg, frm = self.stashedLedgerStatuses[ledgerId].pop()
+        while ledgerInfo.stashedLedgerStatuses:
+            msg, frm = ledgerInfo.stashedLedgerStatuses.pop()
             i += 1
             self.processLedgerStatus(msg, frm)
         logger.debug("{} processed {} stashed ledger statuses".format(self, i))
