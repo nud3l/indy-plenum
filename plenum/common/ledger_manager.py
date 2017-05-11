@@ -842,8 +842,12 @@ class LedgerManager(HasActionQueue):
         ledgerType = getattr(msg, f.LEDGER_ID.nm)
         if ledgerType in self.ledgers:
             return self.ledgers[ledgerType].ledger
-        else:
-            self.discard(msg, reason="Invalid ledger msg type")
+        self.discard(msg, reason="Invalid ledger msg type")
+
+    def getLedgerInfoByType(self, ledgerType):
+        if ledgerType not in self.ledgers:
+            raise ValueError("Invalid ledger type")
+        return self.ledgers[ledgerType]
 
     def appendToLedger(self, ledgerId: int, txn: Any) -> Dict:
         if ledgerId not in self.ledgers:
