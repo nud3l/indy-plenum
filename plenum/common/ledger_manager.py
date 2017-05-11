@@ -98,15 +98,15 @@ class LedgerManager(HasActionQueue):
         self.postAllLedgersCaughtUp = postAllLedgersCaughtUp
         self.config = getConfig()
         # Needs to schedule actions. The owner of the manager has the
-        # responsibility of calling its `_serviceActions` method periodically.
+        # responsibility of calling its `_serviceActions` method periodically
         HasActionQueue.__init__(self)
 
-        # Holds ledgers of different types with their info like the ledger
-        # object, various callbacks, state
+        # Holds ledgers of different types with
+        # their info like callbacks, state, etc
         self.ledgers = {}   # type: Dict[int, LedgerInfo]
 
-        # Largest Pre-Prepare sequence number received during catchup. T
-        # his field is needed to discard any stashed 3 phase messages or
+        # Largest Pre-Prepare sequence number received during catchup.
+        # This field is needed to discard any stashed 3PC messages or
         # ordered messages since the transactions part of those messages
         # will be applied when they are received through the catchup process
         self.lastCaughtUpPpSeqNo = -1
