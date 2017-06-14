@@ -146,3 +146,14 @@ def test_node_notified_about_primary_election_result(nodeSet, looper, up, wallet
     ensureElectionsDone(looper=looper, nodes=nodeSet)
     for node in nodeSet:
         assert node.spylog.count('primary_found') > 0
+
+
+def test_decide_primary_called(nodeSet, looper, up, wallet1, client1, viewNo):
+
+    primary = get_master_primary_node(nodeSet)
+    for node in nodeSet:
+        node.replicas = []
+        node.newNodeJoined(None)
+    ensureElectionsDone(looper=looper, nodes=nodeSet, customTimeout=120)
+    new_primary = get_master_primary_node(nodeSet)
+    assert primary != new_primary
