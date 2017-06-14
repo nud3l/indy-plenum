@@ -134,6 +134,7 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         self.dataDir = self.config.nodeDataDir or "data/nodes"
 
         self._view_change_timeout = self.config.VIEW_CHANGE_TIMEOUT
+        self._primary_election_timeout = self.config.PRIMARY_ELECTION_TIMEOUT
 
         HasFileStorage.__init__(self, name, baseDir=self.basedirpath,
                                 dataDir=self.dataDir)
@@ -347,6 +348,7 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         # of `1:101`
         self.txn_seq_range_to_3phase_key = {}  # type: Dict[int, IntervalTree]
         self._view_change_in_progress = False
+        self.primary_election_in_progress = False
 
     @property
     def id(self):
@@ -938,9 +940,31 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
     def decidePrimaries(self):
         """
         Choose the primary replica for each protocol instance in the system
-        using a PrimaryDecider.
+        using a PrimaryDecider
         """
+        if not self.view_change_in_progress:
+            # If election of primary is started not within view change.
+            # Otherwise timeout for view change is used
+            self.primary_election_in_progress = True
+            self._schedule(action=self._check_primary_found,
+                           seconds=self._primary_election_timeout)
         self.elector.decidePrimaries()
+
+    def _check_primary_found(self):
+        """
+        This thing checks whether new primary was elected.
+        If it was not - starts view change again
+        """
+        if not self.primary_election_in_progress:
+            return
+        if not self.view_change_in_progress:
+            logger.debug("primary election is not completed in time, "
+                         "starting new election")
+            self.decidePrimaries()
+        else:
+            logger.debug("primary election is not completed in time, "
+                         "but there is running view change, so do not "
+                         "restarting election")
 
     def _check_view_change_completed(self):
         """
@@ -1940,6 +1964,7 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
     def primary_found(self):
         # If the node has primary replica of master instance
         # TODO: 0 should be replaced with configurable constant
+        self.primary_election_in_progress = False
         self.monitor.hasMasterPrimary = self.primaryReplicaNo == 0
         if self.view_change_in_progress and self.all_instances_have_primary:
             self.on_view_change_complete(self.viewNo)
