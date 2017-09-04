@@ -13,10 +13,6 @@ notifierPluginTriggerEvents = {
     'clusterThroughputSpike': 'ClusterThroughputSuspiciousSpike',
     # TODO: Implement clusterLatencyTooHigh event triggering
     'clusterLatencyTooHigh': 'ClusterLatencyTooHigh',
-    'nodeUpgradeScheduled': 'NodeUpgradeScheduled',
-    'nodeUpgradeComplete': 'NodeUpgradeComplete',
-    'nodeUpgradeFail': 'NodeUpgradeFail',
-    'poolUpgradeCancel': 'PoolUpgradeCancel'
 }
 
 
@@ -33,22 +29,6 @@ class PluginManager:
         self.plugins = []
         self.topics = notifierPluginTriggerEvents
         self.importPlugins()
-
-    def sendMessageUponNodeUpgradeScheduled(
-            self, message='Node uprgade has been scheduled'):
-        return self._sendMessage(self.topics['nodeUpgradeScheduled'], message)
-
-    def sendMessageUponNodeUpgradeComplete(
-            self, message='Node has successfully upgraded.'):
-        return self._sendMessage(self.topics['nodeUpgradeComplete'], message)
-
-    def sendMessageUponNodeUpgradeFail(
-            self, message='Node upgrade has failed. Please take action.'):
-        return self._sendMessage(self.topics['nodeUpgradeFail'], message)
-
-    def sendMessageUponPoolUpgradeCancel(
-            self, message='Pool upgrade has been cancelled. Please take action.'):
-        return self._sendMessage(self.topics['poolUpgradeCancel'], message)
 
     def sendMessageUponSuspiciousSpike(
             self,
